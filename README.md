@@ -16,7 +16,7 @@ Welcome to the Mapillary Street-Level Images Collection Workshop repository! Thi
 Street-level images contain valuable information that is transforming the future of our cities. By analyzing these images, urban planners, data scientists, and researchers can gain deeper insights into city infrastructure, traffic patterns, greenery distribution, and more.
 
 ## Notebook
-I'm sharing the Jupyter notebook used during the workshop to help you get started with extracting street-level images for specific coordinates using Python. Feel free to explore the code, and use it as a base for your own projects.
+I'm sharing the Jupyter Notebook used during the workshop to help you get started with extracting street-level images for specific coordinates using Python. Feel free to explore the code, and use it as a base for your projects.
 
 ## Getting Started
 To use the notebook:
