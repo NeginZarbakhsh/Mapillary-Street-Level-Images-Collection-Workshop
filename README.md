@@ -2,7 +2,7 @@
 
 Welcome to the Mapillary Street-Level Images Collection Workshop repository! This project focuses on data analytics and Python approaches for retrieving and analyzing street-level images using crowdsourced data. It was developed as part of a workshop I conducted for 35 students at UCD, guiding both undergraduate computer science and master's remote sensing students through practical coding exercises to enhance their skills.
 
-![Workshop Visual]([https://github.com/NeginZarbakhsh/Mapillary-Street-Level-Images-Collection-Workshop/blob/main/Picture1.png]  <!-- Update with the path to the image you uploaded -->
+![Workshop Visual][https://github.com/NeginZarbakhsh/Mapillary-Street-Level-Images-Collection-Workshop/blob/main/Picture1.png]  <!-- Update with the path to the image you uploaded -->
 
 ## Workshop Overview
 - **Participants**: 35 students (Undergraduate Computer Science and Master's Remote Sensing)
