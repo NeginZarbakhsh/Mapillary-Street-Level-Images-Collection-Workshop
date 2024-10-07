@@ -23,4 +23,4 @@ I'm sharing the Jupyter Notebook used during the workshop to help you get starte
 To use the notebook:
 1. **Clone this repository**: 
    ```bash
-   git clone https://github.com/yourusername/Mapillary-Street-Level-Images-Collection-Workshop.git](https://github.com/NeginZarbakhsh/Mapillary-Street-Level-Images-Collection-Workshop
+   git clone https://github.com/NeginZarbakhsh/Mapillary-Street-Level-Images-Collection-Workshop.git]
