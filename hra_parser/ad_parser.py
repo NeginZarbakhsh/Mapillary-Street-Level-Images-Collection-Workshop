@@ -585,7 +585,7 @@ def parse_handelsregister_a_text(text: str) -> dict:
     #          HRA 7709 FL)                                192.000,00 EUR"
     # ------------------------------------------------------------
     komm_block = _block_after(body, _KOMM_MARKER_RE)
-    komm_highlights: list[tuple[str, str]] = []
+    komm_highlights: list[tuple[str, dict]] = []
 
     for entry in _group_entries(komm_block):
         entry, share, waehrung = _take_money(entry)
