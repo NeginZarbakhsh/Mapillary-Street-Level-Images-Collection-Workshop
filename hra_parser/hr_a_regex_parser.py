@@ -1217,6 +1217,11 @@ def parse_handelsregister_or_none(text: str) -> dict | None:
     out = parse_handelsregister_text(text)
     company = out.get("unternehmen", {})
 
+    # Report anything the section gates dropped. This is the difference between
+    # noticing a lost entry now and finding it in a comparison weeks later.
+    for warning in extraction_warnings(text, out):
+        print("[WARN] HR parser:", warning)
+
     missing = [f for f in ("name", "handelsregisternummer", "registergericht")
                if not company.get(f)]
     if missing:
@@ -1224,6 +1229,162 @@ def parse_handelsregister_or_none(text: str) -> dict | None:
         print("[DEBUG] Parsed company so far:", company)
         return None
     return out
+
+
+# ===========================================================================
+# Safety net: what did the section gates throw away?
+#
+# Every extraction above works by locating a section and then matching inside
+# it. That is precise, but it fails silently: if a heading is worded in a way
+# the section pattern does not recognise, or a terminator fires early, the
+# content between the markers is dropped with no error and no empty field to
+# notice — a shorter list looks exactly like a document with fewer people.
+#
+# These functions invert that. They scan the WHOLE document for anything
+# shaped like a person or a company, and report whatever is not present in the
+# output. A miss becomes visible immediately instead of surfacing weeks later
+# as an unexplained mismatch.
+# ===========================================================================
+
+# The scan needs its own pattern rather than the extraction ones. Those are
+# lazy and rely on a following anchor (a money amount, a section end) to know
+# where the town stops; scanning free text there is no anchor, so the town
+# collapses to a single letter and the label comes out unreadable. Here both
+# the surname and the town must be capitalised and the town is bounded, which
+# is looser about position but exact about shape.
+# A heading such as "Kommanditisten, Mitglieder" has exactly the shape of
+# "Surname, Firstname", so the register's own vocabulary has to be excluded
+# from ever being read as a name.
+_HEADING_WORDS = (
+    r"Kommanditist\w*|Mitglied\w*|Inhaber\w*|Gesellschafter\w*|Gesellschaft\w*"
+    r"|Geschäftsführer\w*|Geschäftsführende|Vorstand|Prokura|Prokurist\w*"
+    r"|Rechtsform|Sitz|Firma|Niederlassung|Zweigniederlassung\w*|Direktoren"
+    r"|Vertretungsberechtigte|Vertretungsbefugnis|Vertretungsregelung|Leitungsorgan"
+    r"|Satzung|Beginn|Eintragung\w*|Anschrift|Geschäftsanschrift|Gegenstand"
+    r"|Unternehmens|Stammkapital|Ausdruck|Amtsgericht|Handelsregister|Abteilung"
+    r"|Liquidator\w*|Haftsumme|Hafteinlage|Einlage|Kapitalanteil"
+)
+
+_SCAN_PERSON_RE = re.compile(
+    rf"(?!(?:{_HEADING_WORDS})\b)"
+    r"(?P<nachname>[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-']+)\s*,\s*"
+    r"(?P<vorname>[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-'. ]{0,40}?)\s*,\s*"
+    r"(?:geb\.?\s*(?P<geburtsname>[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-']*)\s*,\s*)?"
+    r"(?:"
+    r"\*(?P<dob1>\d{2}\.\d{2}\.\d{4})\s*,?\s*"
+    r"(?P<ort1>[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-./]*(?:\s+[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-./]*){0,2})"
+    r"|"
+    r"(?P<ort2>[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-./]*(?:\s+[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-./]*){0,2})"
+    r"\s*,?\s*\*(?P<dob2>\d{2}\.\d{2}\.\d{4})"
+    r")"
+)
+
+_ALL_ENTITY_LISTS = (
+    "persoenlich_haftende_gesellschafter",
+    "persoenlich_haftende_gesellschafter_ohne_vertretung",
+    "natuerliche_phGs",
+    "natuerliche_phGs_ohne_vertretung",
+    "kommanditisten_personen",
+    "kommanditisten_gesellschaften",
+    "prokuristen",
+    "leitende_personen",
+    "board",
+    "company_owner",
+    "vertreter",
+)
+
+
+def _output_signatures(parsed: dict) -> set:
+    """Identity of every entity the parser did put in the output."""
+    sigs = set()
+
+    for key in _ALL_ENTITY_LISTS:
+        for rec in parsed.get(key) or []:
+            if not isinstance(rec, dict):
+                continue
+            if rec.get("nachname"):
+                sigs.add(("person", str(rec["nachname"]).lower(),
+                          rec.get("geburtsdatum") or ""))
+            if rec.get("name"):
+                sigs.add(("org", str(rec["name"]).lower(),
+                          re.sub(r"\s+", " ", str(rec.get("handelsregisternummer") or ""))))
+
+    return sigs
+
+
+def unextracted_entities(text: str, parsed: dict) -> list[dict]:
+    """Person- and company-shaped entries in the document that are NOT in the output.
+
+    A birth date or a register parenthetical is required before something counts
+    as an entity, which is what keeps ordinary prose from being reported.
+    """
+    t = normalise_for_parsing(text)
+    have = _output_signatures(parsed)
+    company_hr = re.sub(
+        r"\s+", " ", str((parsed.get("unternehmen") or {}).get("handelsregisternummer") or "")
+    )
+
+    found: list[dict] = []
+    seen: set = set()
+
+    # people: a birth date makes this unambiguous
+    for m in _SCAN_PERSON_RE.finditer(t):
+        last = _norm(m.group("nachname"))
+        first = _norm(m.group("vorname"))
+        dob_raw = m.group("dob1") or m.group("dob2")
+        dob = _to_iso_date(dob_raw) if dob_raw else ""
+        city = _split_ort_land(m.group("ort1") or m.group("ort2") or "")[0]
+        sig = ("person", last.lower(), dob)
+        if sig in have or sig in seen:
+            continue
+        seen.add(sig)
+        found.append({
+            "kind": "person",
+            "label": _norm(f"{first} {last}"),
+            "geburtsdatum": dob,
+            "ort": city,
+            "text": _norm(m.group(0))[:160],
+        })
+
+    # companies: recognised by their register parenthetical
+    for m in _ORG_WITH_REGISTER.finditer(t):
+        name = _clean_company_name(m.group("name"))
+        hr_number = re.sub(r"\s+", " ", _norm(m.group("hr")))
+        if not name or hr_number == company_hr:
+            continue  # the document's own register number is not an entity
+        sig = ("org", name.lower(), hr_number)
+        if sig in have or sig in seen:
+            continue
+        seen.add(sig)
+        found.append({
+            "kind": "company",
+            "label": name,
+            "handelsregisternummer": hr_number,
+            "ort": _split_ort_land(m.group("ort"))[0],
+            "text": _norm(m.group(0))[:160],
+        })
+
+    return found
+
+
+def extraction_warnings(text: str, parsed: dict) -> list[str]:
+    """Human-readable warnings for anything the parse left behind."""
+    warnings = []
+
+    for item in unextracted_entities(text, parsed):
+        detail = item.get("geburtsdatum") or item.get("handelsregisternummer") or ""
+        # The document text is quoted alongside the parsed label on purpose: a
+        # neighbouring entry with no birth date can shift the scanner's idea of
+        # where a name starts, and then the label alone is misleading. The raw
+        # text always points at the right place in the document.
+        warnings.append(
+            f"{item['kind']} in the document but not in the output: "
+            f"{item['label']}"
+            + (f" ({detail})" if detail else "")
+            + f"  <- document text: {item['text']!r}"
+        )
+
+    return warnings
 
 
 def parse_handelsregister_a_or_none(text: str) -> dict | None:

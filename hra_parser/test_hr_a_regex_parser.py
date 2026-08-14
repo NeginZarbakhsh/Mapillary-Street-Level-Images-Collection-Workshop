@@ -621,6 +621,66 @@ def _():
     assert len(r["kommanditisten_personen"]) == 4, r["kommanditisten_personen"]
 
 
+@check("safety net stays quiet when nothing was dropped")
+def _():
+    doc = """
+    Amtsgericht Flensburg  HRA 8195 FL
+    2.a) Firma
+    Windpark Enleni GmbH & Co. KG
+    b) Sitz, Niederlassung, inländische Geschäftsanschrift, Zweigniederlassungen
+    Behrendorf
+    Norderdorf 7, 25850 Behrendorf
+    Persönlich haftender Gesellschafter:
+    Enleni GmbH, Behrendorf (Amtsgericht Flensburg, HRB 10342 FL)
+    c) Kommanditisten, Mitglieder
+    Andresen, Heike Susann, *19.11.1974, Jübek        4.000,00 EUR
+    Nielsen, Jörg, *29.08.1972, Klixbüll            128.000,00 EUR
+    6. Tag der letzten Eintragung
+    08.03.2022
+    """
+    r = P.parse_handelsregister_text(doc)
+    assert P.extraction_warnings(doc, r) == [], P.extraction_warnings(doc, r)
+
+
+@check("safety net reports a person the section gate dropped")
+def _():
+    import re as _re
+
+    doc = """
+    Amtsgericht Flensburg  HRA 8195 FL
+    2.a) Firma
+    Windpark Enleni GmbH & Co. KG
+    b) Sitz: Behrendorf Geschäftsanschrift: Norderdorf 7, 25850 Behrendorf
+    c) Kommanditisten, Mitglieder
+    Andresen, Heike Susann, *19.11.1974, Jübek        4.000,00 EUR
+    Nielsen, Jörg, *29.08.1972, Klixbüll            128.000,00 EUR
+    6. Tag der letzten Eintragung
+    08.03.2022
+    """
+    # Break the section gate the way the colon bug did, and confirm the net
+    # notices — this is the whole point of scanning the document rather than
+    # trusting the gate.
+    saved = P._KOMM_SECTION_RE
+    P._KOMM_SECTION_RE = _re.compile(
+        r"Kommanditist(?:en|\(en\))?\s*:\s*(?P<block>.*?)"
+        r"(?=\s*\d+\s*\.\s*[a-z]?\)?\s*Tag der letzten Eintragung|\Z)",
+        _re.S,
+    )
+    try:
+        r = P.parse_handelsregister_text(doc)
+        assert r["kommanditisten_personen"] == [], "gate should be broken here"
+
+        warnings = P.extraction_warnings(doc, r)
+        assert len(warnings) == 2, warnings
+        joined = " ".join(warnings)
+        assert "Heike Susann Andresen" in joined, warnings
+        assert "Jörg Nielsen" in joined, warnings
+        # the document text must be quoted so a garbled label still points somewhere
+        assert "document text" in joined, warnings
+    finally:
+        P._KOMM_SECTION_RE = saved
+
+
 @check("full integration: every section present at once, nothing dropped")
 def _():
     doc = """
