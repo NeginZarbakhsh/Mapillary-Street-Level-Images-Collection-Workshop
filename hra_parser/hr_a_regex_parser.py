@@ -323,6 +323,99 @@ def _org_record(name, ort, hr_number, court_city, fallback_court, beteiligung) -
     }
 
 
+# ---------------------------------------------------------------------------
+# Section-boundary patterns and the money pattern.
+#
+# These live at module level, not inside the parse function, so that
+# section_blocks() below uses exactly the same patterns the parser itself does.
+# A separate copy would drift and make a diagnostic report the wrong cause.
+# ---------------------------------------------------------------------------
+
+# The Kommanditisten heading carries a colon in the older "Ausdruck" layout
+# ("Kommanditist(en):") but NOT in the "Aktueller Ausdruck" layout, where it is
+# printed bare ("c) Kommanditisten, Mitglieder"). Requiring the colon skipped
+# the whole section, and every Kommanditist in it, on colon-less printouts.
+_KOMM_SECTION_RE = re.compile(
+    r"(?:"
+    r"Kommanditist(?:en|\(en\))?(?:\s*,\s*Mitglieder)?\s*:"
+    r"|(?:\d+\s*\.\s*)?[a-z]\)\s*Kommanditisten(?:\s*,\s*Mitglieder)?\s*:?"
+    r")\s*(?P<block>.*?)"
+    r"(?=\s*\d+\.\s*[a-z]?\)?\s*Tag der letzten Eintragung|\s*Abruf vom|\Z)",
+    re.S,
+)
+
+_PHG_MARKER_RE = re.compile(
+    r"(?:Persönlich haftende[rn]?\s+Gesellschafter(?:in)?\s*:|b\)\s*Inhaber)"
+)
+
+# What ends the partners section. A "4. Prokura:" block commonly sits between
+# the partners and the Kommanditisten; without this the Prokuristen would be
+# read as partners.
+_NEXT_SECTION_RE = re.compile(
+    r"Prokura\s*:"
+    r"|Kommanditist"
+    r"|Rechtsform"
+    r"|Sonstige\s+Rechtsverhältnisse"
+    r"|Tag\s+der\s+letzten\s+Eintragung"
+    r"|Abruf\s+vom"
+)
+
+_PROKURA_SECTION_RE = re.compile(
+    r"\d+\.\s*Prokura\s*:?\s*(?P<block>.*?)"
+    r"(?=\s*\d+\.\s*a\)|\s*\d+\.\s+[A-ZÄÖÜ]|\Z)",
+    re.S | re.I,
+)
+
+# A capital contribution, under any of its printed labels or none at all, in
+# any currency (pre-euro registrations print DEM).
+_MONEY = (
+    r"(?:(?:Haft(?:summe|einlage)|Einlage|Kapitalanteil|Kommanditeinlage)\s*:\s*)?"
+    r"(?P<share>[\d.]+,\d{2})\s*(?P<currency>[A-ZÄÖÜ]{2,3})\b"
+)
+
+
+def normalise_for_parsing(text: str) -> str:
+    """The exact text transform the parser applies before any matching."""
+    text = html.unescape(text or "")
+    text = text.replace("**", " ")
+    return re.sub(r"\s+", " ", text)
+
+
+def section_blocks(text: str) -> dict:
+    """Locate every section block, the same way parse_handelsregister_a_text does.
+
+    Returns the normalised text plus each block's content and character span.
+    This is what lets a diagnostic answer the question that actually matters
+    when an entry goes missing: was the line even inside the block the pattern
+    searches, or did the pattern never see it?
+    """
+    t = normalise_for_parsing(text)
+
+    komm_match = _KOMM_SECTION_RE.search(t)
+    komm_start = komm_match.start() if komm_match else len(t)
+
+    phg_marker = _PHG_MARKER_RE.search(t)
+
+    phg_end = komm_start
+    if phg_marker:
+        boundary = _NEXT_SECTION_RE.search(t, phg_marker.end())
+        if boundary and boundary.start() < phg_end:
+            phg_end = boundary.start()
+
+    phg_start = phg_marker.start() if phg_marker else -1
+    prokura_match = _PROKURA_SECTION_RE.search(t)
+
+    return {
+        "text": t,
+        "komm_block": komm_match.group("block") if komm_match else "",
+        "komm_span": komm_match.span("block") if komm_match else (-1, -1),
+        "phg_block": t[phg_start:phg_end] if phg_marker else "",
+        "phg_span": (phg_start, phg_end),
+        "prokura_block": prokura_match.group("block") if prokura_match else "",
+        "prokura_span": prokura_match.span("block") if prokura_match else (-1, -1),
+    }
+
+
 def parse_handelsregister_a_text(text: str) -> dict:
     """
     Parse text from a German Handelsregister A PDF into the target JSON schema.
@@ -403,35 +496,16 @@ def parse_handelsregister_a_text(text: str) -> dict:
     # Requiring the colon skipped the entire section — and therefore every
     # Kommanditist in the document — on every colon-less printout, silently.
     # Hence two alternatives: labelled-with-colon, or lettered heading.
-    komm_match = re.search(
-        r"(?:"
-        r"Kommanditist(?:en|\(en\))?(?:\s*,\s*Mitglieder)?\s*:"
-        r"|(?:\d+\s*\.\s*)?[a-z]\)\s*Kommanditisten(?:\s*,\s*Mitglieder)?\s*:?"
-        r")\s*(?P<block>.*?)"
-        r"(?=\s*\d+\.\s*[a-z]?\)?\s*Tag der letzten Eintragung|\s*Abruf vom|\Z)",
-        t,
-        re.S,
-    )
+    komm_match = _KOMM_SECTION_RE.search(t)
     komm_block = komm_match.group("block") if komm_match else ""
     komm_start = komm_match.start() if komm_match else len(t)
 
-    phg_marker = re.search(
-        r"(?:Persönlich haftende[rn]?\s+Gesellschafter(?:in)?\s*:|b\)\s*Inhaber)",
-        t,
-    )
+    phg_marker = _PHG_MARKER_RE.search(t)
     head = t[: phg_marker.start()] if phg_marker else t[:komm_start]
 
     # Full span covering both partner sections, so a register number that only
     # appears inside a partner's own entry is never mistaken for the
     # company's. Computed once here; section 5 reuses phg_end for its block.
-    _NEXT_SECTION_RE = re.compile(
-        r"Prokura\s*:"
-        r"|Kommanditist"
-        r"|Rechtsform"
-        r"|Sonstige\s+Rechtsverhältnisse"
-        r"|Tag\s+der\s+letzten\s+Eintragung"
-        r"|Abruf\s+vom"
-    )
     phg_end = komm_start
     if phg_marker:
         boundary = _NEXT_SECTION_RE.search(t, phg_marker.end())
@@ -643,11 +717,7 @@ def parse_handelsregister_a_text(text: str) -> dict:
     # A birth date is required - that is what stops the heading text
     # itself from being read as a person.
     # ==========================================================================
-    prokura_match = re.search(
-        r"\d+\.\s*Prokura\s*:?\s*(?P<block>.*?)(?=\s*\d+\.\s*a\)|\s*\d+\.\s+[A-ZÄÖÜ]|\Z)",
-        t,
-        re.S | re.I,
-    )
+    prokura_match = _PROKURA_SECTION_RE.search(t)
 
     prokura_block = prokura_match.group("block") if prokura_match else ""
 
@@ -780,10 +850,6 @@ def parse_handelsregister_a_text(text: str) -> dict:
     #   Andresen, Heike Susann, *19.11.1974, Jübek 4.000,00 EUR
     #   Löffelhardt, Robert Gottlieb, Brühl, *13.04.1964, Einlage: 2.985.000,00 DEM
     # ------------------------------------------------------------
-    _MONEY = (
-        r"(?:(?:Haft(?:summe|einlage)|Einlage|Kapitalanteil|Kommanditeinlage)\s*:\s*)?"
-        r"(?P<share>[\d.]+,\d{2})\s*(?P<currency>[A-ZÄÖÜ]{2,3})\b"
-    )
 
     kp_pattern = re.compile(r"(?:Dr\.\s*)?" + _PERSON_ANY + r"\s*,?\s*" + _MONEY, re.S)
 
