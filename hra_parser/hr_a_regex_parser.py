@@ -11,6 +11,16 @@ try:
 except Exception:
     get_bundesland_data = None
 
+# Optional companion. When ad_sections.py sits beside this file, parse_document()
+# below also flattens tables, strips page furniture, and reports whether every
+# line of the document was accounted for. Without it the parser still works and
+# still reports missing entities — it just cannot answer "was the WHOLE document
+# used", because that needs line structure this file collapses internally.
+try:
+    from ad_sections import format_coverage, normalize_ad_text, text_coverage
+except Exception:
+    format_coverage = normalize_ad_text = text_coverage = None
+
 BASE_OUTPUT = {
     "unternehmen": {
         "name": "",
@@ -625,8 +635,12 @@ def parse_handelsregister_a_text(text: str) -> dict:
     #         unternehmen.adresse.nameKomplett
     #         unternehmen.rechtsform   (derived from the name text)
     # ==========================================================================
+    # The name runs until the next heading. Requiring specifically a "b)" meant
+    # a document whose b) section is worded differently, or lost in extraction,
+    # produced no company name at all.
     m_name = re.search(
-        r"2\.\s*a\)\s*Firma:?\s*(.+?)(?=\s*b\)\s*Sitz|\s*b\))",
+        r"2\.\s*a\)\s*Firma:?\s*(.+?)"
+        r"(?=\s*b\)\s*Sitz|\s*[b-z]\)|\s*\d+\s*\.\s|\Z)",
         t,
         re.S | re.I,
     )
@@ -1385,6 +1399,87 @@ def extraction_warnings(text: str, parsed: dict) -> list[str]:
         )
 
     return warnings
+
+
+def parse_document(text: str, *, quiet: bool = False) -> dict:
+    """Normalise, parse and verify in one call — the entry point to use.
+
+        from hr_a_regex_parser import parse_document
+        data = parse_document(raw_text_from_your_pdf_reader)
+
+    Returns the schema dict, unchanged in shape: no extra keys are added, so a
+    field-by-field comparison against the XML is unaffected.
+
+    Anything the parse left behind is printed as a warning rather than returned,
+    for the same reason. Pass quiet=True to suppress that and call
+    document_warnings() yourself instead.
+
+    Tables are flattened and page furniture removed first when ad_sections.py is
+    available; without it the text is parsed as given.
+    """
+    prepared = normalize_ad_text(text) if normalize_ad_text else text
+    data = parse_handelsregister_text(prepared)
+
+    if not quiet:
+        for line in document_warnings(prepared, data):
+            print("[WARN] HR parser:", line)
+
+    return data
+
+
+def document_warnings(text: str, parsed: dict) -> list[str]:
+    """Everything the parse left behind, at both levels that apply to text.
+
+    Entities first — a person or company present in the document but absent
+    from the output. Then, if ad_sections.py is available, any line of the
+    document that produced nothing and cannot be explained as a heading, page
+    furniture, boilerplate or a section with no schema field.
+    """
+    warnings = list(extraction_warnings(text, parsed))
+
+    if text_coverage is not None:
+        report = text_coverage(text, parsed)
+        for item in report["unaccounted"]:
+            warnings.append(
+                f"line produced nothing  [{item['section']} {item['title'][:32]}]"
+                f"  {item['line'][:100]}"
+            )
+
+    return warnings
+
+
+def document_report(text: str, parsed: dict | None = None) -> str:
+    """A human-readable summary of what was extracted and what was not."""
+    prepared = normalize_ad_text(text) if normalize_ad_text else text
+    data = parsed if parsed is not None else parse_handelsregister_text(prepared)
+    company = data.get("unternehmen") or {}
+
+    lines = [
+        f"firma  : {company.get('name')!r}",
+        f"hr-nr  : {company.get('handelsregisternummer')!r}  "
+        f"({detect_register_type(text)})",
+        f"phg {len(data['persoenlich_haftende_gesellschafter'])}"
+        f"  natPHG {len(data['natuerliche_phGs'])}"
+        f"  prok {len(data['prokuristen'])}"
+        f"  komm-P {len(data['kommanditisten_personen'])}"
+        f"  komm-G {len(data['kommanditisten_gesellschaften'])}"
+        f"  leitend {len(data['leitende_personen'])}"
+        f"  owner {len(data['company_owner'])}",
+        "",
+    ]
+
+    if text_coverage is not None and format_coverage is not None:
+        lines.append(format_coverage(text_coverage(prepared, data)))
+        lines.append("")
+
+    problems = extraction_warnings(prepared, data)
+    if problems:
+        lines.append(f"MISSING ENTITIES ({len(problems)})")
+        lines.extend(f"  {w}" for w in problems)
+    else:
+        lines.append("No entity in the document is missing from the output.")
+
+    return "\n".join(lines)
 
 
 def parse_handelsregister_a_or_none(text: str) -> dict | None:

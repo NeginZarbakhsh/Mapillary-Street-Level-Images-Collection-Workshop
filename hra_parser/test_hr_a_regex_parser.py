@@ -681,6 +681,64 @@ def _():
         P._KOMM_SECTION_RE = saved
 
 
+@check("parse_document is the one call: normalise, parse, verify")
+def _():
+    doc = """
+    Abruf vom 24.07.2026, 14:02   HRA 8195 FL
+    Amtsgericht Flensburg
+    - Handelsregister Abteilung A -
+    2.a) Firma
+    Windpark Enleni GmbH & Co. KG
+    b) Sitz, Niederlassung, inländische Geschäftsanschrift, Zweigniederlassungen
+    Behrendorf
+    Norderdorf 7, 25850 Behrendorf
+    c) Kommanditisten, Mitglieder
+    Andresen, Heike Susann, *19.11.1974, Jübek        4.000,00 EUR
+    3.
+    24.07.2026                                         Seite 1 von 2
+    Ausdruck
+    - Wiedergabe des aktuellen Registerinhalts -
+    Abruf vom 24.07.2026, 14:02   HRA 8195 FL
+    Carstensen, Gerd, *26.03.1955, Haselund           4.000,00 EUR
+    6. Tag der letzten Eintragung
+    08.03.2022
+    """
+    data = P.parse_document(doc, quiet=True)
+
+    # the returned dict must keep the schema shape exactly — no extra keys, or
+    # a field-by-field comparison against the XML breaks
+    assert set(data) == set(P.BASE_OUTPUT), set(data) ^ set(P.BASE_OUTPUT)
+
+    names = {k["adresse"]["nameKomplett"] for k in data["kommanditisten_personen"]}
+    assert names == {"Heike Susann Andresen", "Gerd Carstensen"}, names
+    assert P.document_warnings(doc, data) == [], P.document_warnings(doc, data)
+
+
+@check("parse_document still works when ad_sections.py is absent")
+def _():
+    # The companion file is optional. Simulate it missing and confirm the
+    # parser still extracts and still reports missing entities — only the
+    # whole-document coverage line is lost.
+    saved = (P.normalize_ad_text, P.text_coverage, P.format_coverage)
+    P.normalize_ad_text = P.text_coverage = P.format_coverage = None
+    try:
+        doc = """
+        Amtsgericht Flensburg   HRA 8195 FL
+        2.a) Firma
+        Windpark Enleni GmbH & Co. KG
+        c) Kommanditisten, Mitglieder
+        Andresen, Heike Susann, *19.11.1974, Jübek        4.000,00 EUR
+        6. Tag der letzten Eintragung
+        08.03.2022
+        """
+        data = P.parse_document(doc, quiet=True)
+        assert len(data["kommanditisten_personen"]) == 1, data["kommanditisten_personen"]
+        assert "Windpark" in data["unternehmen"]["name"]
+        assert isinstance(P.document_report(doc, data), str)
+    finally:
+        P.normalize_ad_text, P.text_coverage, P.format_coverage = saved
+
+
 @check("full integration: every section present at once, nothing dropped")
 def _():
     doc = """
