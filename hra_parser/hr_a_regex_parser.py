@@ -362,7 +362,11 @@ _KOMM_SECTION_RE = re.compile(
     r"Kommanditist(?:en|\(en\))?(?:\s*,\s*Mitglieder)?\s*:"
     r"|(?:\d+\s*\.\s*)?[a-z]\)\s*Kommanditisten(?:\s*,\s*Mitglieder)?\s*:?"
     r")\s*(?P<block>.*?)"
-    r"(?=\s*\d+\.\s*[a-z]?\)?\s*Tag der letzten Eintragung|\s*Abruf vom|\Z)",
+    # Only "Tag der letzten Eintragung" or the end of the document may close
+    # this block. "Abruf vom" used to close it too, but that phrase sits in the
+    # running header of EVERY page, so on a two-page list the block stopped at
+    # the first page break and every entry printed after it was lost.
+    r"(?=\s*\d+\s*\.\s*[a-z]?\)?\s*Tag der letzten Eintragung|\Z)",
     re.S,
 )
 
@@ -379,7 +383,6 @@ _NEXT_SECTION_RE = re.compile(
     r"|Rechtsform"
     r"|Sonstige\s+Rechtsverhältnisse"
     r"|Tag\s+der\s+letzten\s+Eintragung"
-    r"|Abruf\s+vom"
 )
 
 _PROKURA_SECTION_RE = re.compile(
@@ -396,10 +399,24 @@ _MONEY = (
 )
 
 
+# The running header/footer a multi-page printout repeats on every page. These
+# phrases carry no data, and leaving them in splits a list across the page
+# break, so they come out before anything is matched. The court name and the
+# register number are deliberately NOT removed — they are read from the header.
+_PAGE_FURNITURE_RE = re.compile(
+    r"Seite\s+\d+\s+von\s+\d+"
+    r"|-{1,3}\s*Wiedergabe des aktuellen Registerinhalts\s*-{1,3}"
+    r"|-{1,3}\s*Handelsregister\s+Abteilung\s+[AB]\s*-{1,3}"
+    r"|---\s*page\s+\d+\s*---",
+    re.I,
+)
+
+
 def normalise_for_parsing(text: str) -> str:
     """The exact text transform the parser applies before any matching."""
     text = html.unescape(text or "")
     text = text.replace("**", " ")
+    text = _PAGE_FURNITURE_RE.sub(" ", text)
     return re.sub(r"\s+", " ", text)
 
 
@@ -1047,7 +1064,6 @@ _HRB_ORGAN_END_RE = re.compile(
     r"\d+\s*\.\s*Prokura\b"
     r"|(?:\d+\s*\.\s*)?[a-z]?\)?\s*Rechtsform\s*,\s*Beginn"
     r"|Tag\s+der\s+letzten\s+Eintragung"
-    r"|Abruf\s+vom"
 )
 
 # A role label introducing one or more people inside the organ section.
@@ -1086,7 +1102,9 @@ def detect_register_type(text: str) -> str:
     Reads the printed department line and the register number, not the file
     name, so a mislabelled file still routes correctly.
     """
-    t = normalise_for_parsing(text)
+    # Deliberately not normalise_for_parsing: that strips the department line
+    # as page furniture, which is exactly what this needs to read.
+    t = re.sub(r"\s+", " ", html.unescape(text or ""))
 
     if re.search(r"Handelsregister\s+Abteilung\s+B\b", t):
         return "B"

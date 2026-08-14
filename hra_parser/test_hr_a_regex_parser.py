@@ -579,6 +579,48 @@ def _():
     assert "geburtsname" not in k, k
 
 
+@check("list spanning a page break keeps every entry")
+def _():
+    # The running header repeats on page 2. It contains "Abruf vom", which used
+    # to terminate the section, so everything printed after the first page
+    # break was silently dropped.
+    doc = """
+    Abruf vom 24.07.2026, 14:02      HRA 8195 FL
+    Amtsgericht Flensburg
+    - Handelsregister Abteilung A -
+    2.a) Firma
+    Windpark Enleni GmbH & Co. KG
+    b) Sitz, Niederlassung, inländische Geschäftsanschrift, Zweigniederlassungen
+    Behrendorf
+    Norderdorf 7, 25850 Behrendorf
+    c) Kommanditisten, Mitglieder
+    1.
+    Andresen, Heike Susann, *19.11.1974, Jübek        4.000,00 EUR
+    2.
+    Nielsen, Jörg, *29.08.1972, Klixbüll            128.000,00 EUR
+    3.
+    24.07.2026                                       Seite 1 von 2
+    Ausdruck
+    - Wiedergabe des aktuellen Registerinhalts -
+    Abruf vom 24.07.2026, 14:02      HRA 8195 FL
+    Amtsgericht Flensburg
+    - Handelsregister Abteilung A -
+    Peters, Daniela Ursel, *03.12.1968, Schacht-Audorf   4.000,00 EUR
+    4.
+    Carstensen, Gerd, *26.03.1955, Haselund             4.000,00 EUR
+    6. Tag der letzten Eintragung
+    08.03.2022
+    """
+    r = P.parse_handelsregister_text(doc)
+    names = {k["adresse"]["nameKomplett"] for k in r["kommanditisten_personen"]}
+    assert names == {
+        "Heike Susann Andresen", "Jörg Nielsen",
+        "Daniela Ursel Peters", "Gerd Carstensen",
+    }, names
+    # the page furniture itself must not become an entry
+    assert len(r["kommanditisten_personen"]) == 4, r["kommanditisten_personen"]
+
+
 @check("full integration: every section present at once, nothing dropped")
 def _():
     doc = """
