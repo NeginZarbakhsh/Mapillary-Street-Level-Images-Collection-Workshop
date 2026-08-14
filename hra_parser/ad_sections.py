@@ -340,3 +340,235 @@ def format_audit(report: dict) -> str:
         out.append(f"  {s['key']:>4}  {s['title'][:60]:<60} {s['lines']:>3} lines")
 
     return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# 5) Text coverage — is EVERY line of the document accounted for?
+# ---------------------------------------------------------------------------
+#
+# audit_extraction only inspects lines carrying a birth date, an amount or a
+# register number. That answers "did a known entity go missing", not "is the
+# whole document being used". This does the second: every non-empty line is
+# put in exactly one bucket.
+#
+#   used         - something from this line reached the output
+#   skipped      - a heading, page furniture, or a section with no schema field
+#   unaccounted  - nothing from this line reached the output, and we cannot
+#                  explain why. THIS is the bucket to read.
+#
+# A line landing in "unaccounted" is not automatically a bug — a register
+# prints plenty of prose nobody wants — but nothing can be silently lost
+# without appearing there first.
+
+# Sections deliberately not extracted, and why.
+_NOT_EXTRACTED_SECTIONS = {
+    "1": "Anzahl der bisherigen Eintragungen — no field in the schema",
+    "2c": "Gegenstand des Unternehmens — no field in the schema",
+    "3": "Grund- oder Stammkapital — no field in the schema",
+    "5b": "Sonstige Rechtsverhältnisse — no field in the schema",
+    "6b": "Sonstige Rechtsverhältnisse — no field in the schema",
+}
+
+# Unanchored, unlike _PAGE_FURNITURE: a footer often shares its line with the
+# retrieval date ("24.07.2026        Seite 1 von 2"), so an anchored match
+# misses it and the line lands in "unaccounted", where it would train the
+# reader to ignore that bucket.
+_FURNITURE_ANYWHERE = re.compile(
+    r"Seite\s+\d+\s+von\s+\d+"
+    r"|Wiedergabe des aktuellen Registerinhalts"
+    r"|Handelsregister\s+Abteilung"
+    r"|Abruf\s+vom\s+\d{2}\.\d{2}\.\d{4}"
+    r"|^\s*(?:Aktueller\s+)?Ausdruck\s*-?\s*$"
+    r"|^\s*Amtsgericht\s+\S+\s*$",
+    re.I | re.M,
+)
+
+# A flattened table keeps its header row ("Nr., Name, Wohnort, ..."), which is
+# column labelling, not data. Recognised by every cell being a known header
+# word, so a real entry can never be mistaken for one.
+_TABLE_HEADER_WORDS = {
+    "nr", "nr.", "lfd", "lfd.", "pos", "pos.", "name", "nachname", "vorname",
+    "geburtsname", "wohnort", "ort", "sitz", "geburtsdatum", "geboren",
+    "hafteinlage", "haftsumme", "einlage", "kapitalanteil", "betrag", "anteil",
+    "währung", "waehrung", "land", "staat", "bemerkung", "funktion", "rolle",
+}
+
+
+def _is_table_header(line: str) -> bool:
+    cells = [c.strip().lower() for c in line.split(",")]
+    cells = [c for c in cells if c]
+    return len(cells) >= 2 and all(c in _TABLE_HEADER_WORDS for c in cells)
+
+
+# A label introducing entries, not data itself.
+_ROLE_LABEL_LINE = re.compile(
+    r"^\s*(?:Persönlich haftende[rn]?\s+Gesellschafter(?:in)?"
+    r"|Kommanditist(?:\(en\)|en|in)?"
+    r"|Inhaber(?:in)?|Geschäftsführer(?:in)?|Vorstand|Prokurist(?:en|in)?"
+    r"|Geschäftsführende\s+Direktoren|Liquidator(?:in)?)"
+    r"[^:]{0,40}:\s*$",
+    re.I,
+)
+
+# Boilerplate the register prints as prose, with no field to receive it.
+# Matched case-insensitively: the same sentence appears with and without a
+# leading capital depending on where it sits, and a case-sensitive list let
+# real boilerplate fall into "unaccounted", which is the one bucket that has
+# to stay trustworthy.
+_PROSE_MARKERS = (
+    "vertretungsregelung",
+    "vertretungsbefugnis",
+    "vertritt",
+    "vertreten",
+    "mit der befugnis",
+    "die gesellschaft hat",
+    "handelt allein",
+    "abzuschließen",
+    "abschließen",
+    "gesellschaftsvertrag",
+    "zuletzt geändert",
+    "rechtsgeschäfte",
+    "im namen der gesellschaft",
+    "erteilt werden",
+    "bestellt",
+)
+
+
+def _output_values(parsed: dict) -> set[str]:
+    """Every distinctive string the parser produced, for 'did this line land'."""
+    values: set[str] = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+        elif isinstance(node, str) and len(node.strip()) > 3:
+            values.add(node.strip())
+
+    walk(parsed)
+
+    # money and dates are reformatted on the way out, so add the printed forms
+    for key in ("kommanditisten_personen", "kommanditisten_gesellschaften"):
+        for rec in parsed.get(key) or []:
+            share = (rec.get("beteiligung") or {}).get("share")
+            german = _en_money_to_german(share)
+            if german:
+                values.add(german)
+
+    for value in list(values):
+        german_date = _iso_to_german(value)
+        if german_date:
+            values.add(german_date)
+
+    return values
+
+
+def text_coverage(text: str, parsed: dict) -> dict:
+    """Bucket every line of the document as used / skipped / unaccounted."""
+    sections = split_sections(text)
+    values = _output_values(parsed)
+
+    used: list[str] = []
+    skipped: list[dict] = []
+    unaccounted: list[dict] = []
+
+    for section in sections:
+        reason = _NOT_EXTRACTED_SECTIONS.get(section.key)
+
+        for line in section.lines:
+            stripped = line.strip()
+            if len(stripped) < 3 or stripped in {"---", "--", "-"}:
+                continue
+
+            if _FURNITURE_ANYWHERE.search(stripped) or re.fullmatch(r"[\d.,\s]+", stripped):
+                skipped.append({"line": stripped, "why": "page furniture / list index"})
+                continue
+
+            if _ROLE_LABEL_LINE.match(stripped):
+                skipped.append({"line": stripped, "why": "role label, not data"})
+                continue
+
+            if _is_table_header(stripped):
+                skipped.append({"line": stripped, "why": "table header row"})
+                continue
+
+            # A line carrying a birth date or a register number is judged on
+            # THAT token alone. Asking merely whether any output string appears
+            # in the line is far too weak: a dropped Kommanditist's line still
+            # contains their town, and if any extracted person shares that town
+            # the line looks used while the person is missing — the metric then
+            # reads 100% with data lost, which is worse than no metric.
+            key_tokens = [
+                m.group(1) for m in re.finditer(r"\*\s*(\d{2}\.\d{2}\.\d{4})", stripped)
+            ] + [
+                re.sub(r"\s+", " ", m.group(0))
+                for m in re.finditer(r"(?:HRA|HRB|GnR|PR|VR)\s*\d+(?:\s+[A-ZÄÖÜ]{1,3})?", stripped)
+            ]
+
+            if key_tokens:
+                if all(tok in values for tok in key_tokens):
+                    used.append(stripped)
+                else:
+                    unaccounted.append({
+                        "section": section.key,
+                        "title": section.title,
+                        "line": stripped,
+                    })
+                continue
+
+            if any(v in stripped for v in values):
+                used.append(stripped)
+                continue
+
+            # The legal form is consumed but stored as a numeric code, so the
+            # printed words never appear in the output verbatim.
+            if "Rechtsform" in section.title and (parsed.get("unternehmen") or {}).get("rechtsform"):
+                skipped.append({"line": stripped, "why": "legal form — stored as a code"})
+                continue
+
+            if reason:
+                skipped.append({"line": stripped, "why": reason})
+                continue
+
+            lowered = stripped.lower()
+            if any(marker in lowered for marker in _PROSE_MARKERS):
+                skipped.append({"line": stripped, "why": "boilerplate prose — no field"})
+                continue
+
+            unaccounted.append({
+                "section": section.key,
+                "title": section.title,
+                "line": stripped,
+            })
+
+    total = len(used) + len(skipped) + len(unaccounted)
+
+    return {
+        "used": used,
+        "skipped": skipped,
+        "unaccounted": unaccounted,
+        "total_lines": total,
+        "pct_accounted": (100.0 * (total - len(unaccounted)) / total) if total else 100.0,
+    }
+
+
+def format_coverage(report: dict) -> str:
+    out = [
+        f"TEXT COVERAGE  {report['pct_accounted']:.0f}%  "
+        f"({len(report['used'])} used, {len(report['skipped'])} skipped, "
+        f"{len(report['unaccounted'])} unaccounted of {report['total_lines']} lines)",
+    ]
+
+    if report["unaccounted"]:
+        out.append("")
+        out.append("UNACCOUNTED — nothing from these lines reached the output:")
+        for item in report["unaccounted"]:
+            out.append(f"  [{item['section']}] {item['title'][:40]}")
+            out.append(f"      {item['line'][:110]}")
+    else:
+        out.append("Every line is either used or explained.")
+
+    return "\n".join(out)

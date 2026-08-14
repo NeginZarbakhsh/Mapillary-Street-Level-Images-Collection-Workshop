@@ -30,8 +30,9 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ad_sections import audit_extraction, format_audit, normalize_ad_text, split_sections
-from hr_a_regex_parser import parse_handelsregister_a_text
+from ad_sections import (audit_extraction, format_audit, format_coverage,
+                         normalize_ad_text, split_sections, text_coverage)
+from hr_a_regex_parser import parse_handelsregister_text
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +141,43 @@ def _extract_pdfminer(path: Path) -> str | None:
 _EXTRACTORS = (_extract_pdfplumber, _extract_pymupdf, _extract_pdfminer)
 
 
+def page_extraction_report(path) -> dict:
+    """How much text each page yielded.
+
+    Text-level checks (coverage, the parser's own safety net) can only inspect
+    text that was extracted. A page that produced nothing is invisible to them:
+    they would report 100% while a whole page of people is missing. This looks
+    at the PDF itself, so an empty or near-empty page is caught.
+
+    A genuinely blank page is normal; a scanned page with no text layer is not,
+    and needs OCR rather than a regex fix.
+    """
+    path = Path(path)
+    pages: list[dict] = []
+
+    try:
+        import pdfplumber
+    except ImportError:
+        return {"pages": [], "empty_pages": [], "checked": False,
+                "note": "pdfplumber not installed — page check skipped"}
+
+    try:
+        with pdfplumber.open(str(path)) as pdf:
+            for number, page in enumerate(pdf.pages, start=1):
+                try:
+                    body = page.extract_text() or ""
+                except Exception:
+                    body = ""
+                pages.append({"page": number, "chars": len(body.strip())})
+    except Exception as exc:
+        return {"pages": [], "empty_pages": [], "checked": False,
+                "note": f"could not open PDF: {exc}"}
+
+    empty = [p["page"] for p in pages if p["chars"] < 20]
+
+    return {"pages": pages, "empty_pages": empty, "checked": True, "note": ""}
+
+
 def extract_pdf_text(path) -> str:
     """Read a PDF to text, flattening any detected tables into prose lines."""
     path = Path(path)
@@ -181,6 +219,8 @@ class AdResult:
     audit: dict
     source: str = ""
     sections: list = field(default_factory=list)
+    pages: dict = field(default_factory=dict)
+    coverage: dict = field(default_factory=dict)
 
     @property
     def missed(self) -> list:
@@ -188,8 +228,18 @@ class AdResult:
 
     @property
     def complete(self) -> bool:
-        """True when no data-bearing line was left unextracted."""
-        return not self.audit.get("missed") and not self.audit.get("empty_sections")
+        """True when nothing was lost at any of the three levels.
+
+        A page that yielded no text counts as incomplete even when every line
+        that WAS extracted is accounted for — otherwise a lost page reads as a
+        clean run.
+        """
+        return (
+            not self.audit.get("missed")
+            and not self.audit.get("empty_sections")
+            and not self.pages.get("empty_pages")
+            and not self.coverage.get("unaccounted")
+        )
 
     def report(self) -> str:
         head = [
@@ -203,6 +253,20 @@ class AdResult:
             f"  komm-G: {len(self.data['kommanditisten_gesellschaften'])}",
             "",
         ]
+        if self.pages.get("empty_pages"):
+            head.append(
+                f"WARNING: page(s) {self.pages['empty_pages']} produced no text — "
+                f"likely a scan needing OCR, not a parsing problem"
+            )
+            head.append("")
+        elif self.pages.get("checked"):
+            head.append(f"pages  : {len(self.pages['pages'])}, all yielded text")
+            head.append("")
+
+        if self.coverage:
+            head.append(format_coverage(self.coverage))
+            head.append("")
+
         return "\n".join(head) + format_audit(self.audit)
 
 
@@ -215,8 +279,16 @@ def parse_ad_pdf(source) -> AdResult:
     raw = _read_source(source)
 
     text = normalize_ad_text(raw)
-    data = parse_handelsregister_a_text(text)
+    data = parse_handelsregister_text(text)
     audit = audit_extraction(text, data)
+
+    pages = {}
+    try:
+        candidate = Path(str(source))
+        if candidate.exists() and candidate.suffix.lower() == ".pdf":
+            pages = page_extraction_report(candidate)
+    except Exception:
+        pages = {}
 
     return AdResult(
         data=data,
@@ -225,6 +297,8 @@ def parse_ad_pdf(source) -> AdResult:
         audit=audit,
         source=str(source)[:120] if not isinstance(source, str) or len(str(source)) < 200 else "<text>",
         sections=split_sections(text),
+        pages=pages,
+        coverage=text_coverage(text, data),
     )
 
 
