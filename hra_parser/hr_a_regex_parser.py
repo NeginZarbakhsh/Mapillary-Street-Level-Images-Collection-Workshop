@@ -930,6 +930,225 @@ def parse_handelsregister_a_text(text: str) -> dict:
     return out
 
 
+# ===========================================================================
+# Handelsregister Abteilung B (HRB)
+#
+# An HRB printout is the same document family but numbers its sections
+# differently and holds different roles:
+#
+#     HRA  3. b) Inhaber, persoenlich haftende Gesellschafter
+#     HRB  4. b) Vorstand, Leitungsorgan, geschaeftsfuehrende Direktoren,
+#                persoenlich haftende Gesellschafter, Geschaeftsfuehrer, ...
+#
+#     HRA  5. c) Kommanditisten          HRB  (none - a GmbH has no Kommanditisten)
+#     HRA  5. a) Rechtsform              HRB  6. a) Rechtsform
+#     HRA  6.    Tag der letzten Eintr.  HRB  7.    Tag der letzten Eintragung
+#     HRA  (none)                        HRB  3.    Grund- oder Stammkapital
+#
+# Inside 4. b) the people are introduced by a role label ("Geschaeftsfuehrer:",
+# "Vorstand:"), which is what decides the output list.
+# ===========================================================================
+
+# Which output list each printed role maps to.
+#
+# "Geschaeftsfuehrer -> leitende_personen" is CONFIRMED against a real XML
+# output. The others are assumptions: they are grouped here, on one screen, so
+# that checking them against your XML and correcting them is a one-line edit
+# rather than a hunt through the parser.
+HRB_ROLE_TO_FIELD = {
+    "geschäftsführer": "leitende_personen",              # confirmed
+    "geschäftsführende direktoren": "leitende_personen",  # assumption
+    "vorstand": "leitende_personen",                      # assumption; may be "board"
+    "liquidator": "leitende_personen",                    # assumption
+    "inhaber": "company_owner",                           # assumption
+    "persönlich haftender gesellschafter": "persoenlich_haftende_gesellschafter",
+    "persönlich haftende gesellschafter": "persoenlich_haftende_gesellschafter",
+}
+
+_HRB_DEFAULT_FIELD = "leitende_personen"
+
+# A surname must begin with a capital (after any lower-case particle). The HRA
+# patterns are looser, which is safe there because a birth date is required;
+# here entries may carry no date, so the stricter head keeps the boilerplate
+# prose in this section from being read as a person.
+_NAME_HEAD_STRICT = (
+    rf"(?P<nachname>{_SURNAME_PARTICLE}[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-']*)\s*,\s*"
+    r"(?P<vorname>[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-'. ]*?)\s*,\s*"
+)
+
+# Where the organ section starts and stops.
+_HRB_ORGAN_MARKER_RE = re.compile(
+    r"(?:\d+\s*\.\s*)?b\)\s*Vorstand\b"
+    r"|Geschäftsführer\s*:"
+    r"|Vorstand\s*:"
+    r"|Geschäftsführende\s+Direktoren\s*:"
+)
+
+_HRB_ORGAN_END_RE = re.compile(
+    r"\d+\s*\.\s*Prokura\b"
+    r"|(?:\d+\s*\.\s*)?[a-z]?\)?\s*Rechtsform\s*,\s*Beginn"
+    r"|Tag\s+der\s+letzten\s+Eintragung"
+    r"|Abruf\s+vom"
+)
+
+# A role label introducing one or more people inside the organ section.
+_HRB_ROLE_LABEL_RE = re.compile(
+    r"(?P<role>"
+    r"Geschäftsführer(?:in)?"
+    r"|Geschäftsführende\s+Direktoren"
+    r"|Vorstand"
+    r"|Liquidator(?:in)?"
+    r"|Inhaber(?:in)?"
+    r"|Persönlich haftende[rn]?\s+Gesellschafter(?:in)?"
+    r")\s*:"
+)
+
+# A person as printed in an HRB organ section. The birth date may be absent —
+# an older entry prints a profession instead ("Asmussen, Hans P., Handewitt,
+# Landwirt") — so all three orderings are spelled out.
+_HRB_PERSON_RE = re.compile(
+    _NAME_HEAD_STRICT +
+    r"(?:"
+    rf"\*(?P<dob1>{_DATE})\s*,?\s*(?P<ort1>[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-./]*(?:\s+[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-./]*){{0,2}}?)"
+    r"|"
+    rf"(?P<ort2>[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-./]*(?:\s+[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-./]*){{0,2}}?)\s*,?\s*\*(?P<dob2>{_DATE})"
+    r"|"
+    r"(?P<ort3>[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-./]*(?:\s+[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-./]*){0,2}?)"
+    r")"
+    # stop at a profession, the next entry, a new label, or the end
+    r"(?=\s*,\s*[A-ZÄÖÜ]|\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-']*\s*,|\s*$)",
+    re.S,
+)
+
+
+def detect_register_type(text: str) -> str:
+    """'B' for a Handelsregister Abteilung B printout, otherwise 'A'.
+
+    Reads the printed department line and the register number, not the file
+    name, so a mislabelled file still routes correctly.
+    """
+    t = normalise_for_parsing(text)
+
+    if re.search(r"Handelsregister\s+Abteilung\s+B\b", t):
+        return "B"
+    if re.search(r"Handelsregister\s+Abteilung\s+A\b", t):
+        return "A"
+
+    # No department line: fall back to which register number appears first.
+    m = re.search(r"\bHR(?P<kind>[AB])\s*\d", t)
+    if m:
+        return m.group("kind")
+
+    # An unmistakably HRB-only section.
+    if re.search(r"Grund-\s*oder\s*Stammkapital", t):
+        return "B"
+
+    return "A"
+
+
+def parse_handelsregister_b_text(text: str) -> dict:
+    """Parse a Handelsregister Abteilung B printout into the same schema.
+
+    The company-level fields (name, register number, court, address, legal
+    form) are printed identically in both departments, so those come from the
+    Abteilung A pass; the HRA-only lists simply stay empty on a B document.
+    Only the organ section differs, and that is what this adds.
+    """
+    out = parse_handelsregister_a_text(text)
+    t = normalise_for_parsing(text)
+
+    marker = _HRB_ORGAN_MARKER_RE.search(t)
+    if not marker:
+        return out
+
+    end = len(t)
+    boundary = _HRB_ORGAN_END_RE.search(t, marker.end())
+    if boundary:
+        end = boundary.start()
+
+    block = t[marker.start():end]
+
+    # Split the block into (role, text) runs so each person lands in the list
+    # its own label dictates.
+    runs: list[tuple[str, str]] = []
+    labels = list(_HRB_ROLE_LABEL_RE.finditer(block))
+
+    if labels:
+        for i, lab in enumerate(labels):
+            stop = labels[i + 1].start() if i + 1 < len(labels) else len(block)
+            runs.append((lab.group("role").lower(), block[lab.end():stop]))
+    else:
+        runs.append(("", block))
+
+    for role, body in runs:
+        field = HRB_ROLE_TO_FIELD.get(re.sub(r"\s+", " ", role).strip(), _HRB_DEFAULT_FIELD)
+
+        # A company acting as an organ (a KGaA's general partner, say) is
+        # recognised by its register parenthetical, exactly as in Abteilung A.
+        for m in _ORG_WITH_REGISTER.finditer(body):
+            name = _clean_company_name(m.group("name"))
+            if not name:
+                continue
+            org_ort, _land = _split_ort_land(m.group("ort"))
+            hr_number = re.sub(r"\s+", " ", _norm(m.group("hr")))
+            target = field if field in ("persoenlich_haftende_gesellschafter",
+                                        "company_owner") else "persoenlich_haftende_gesellschafter"
+            if any(e["name"] == name and e["handelsregisternummer"] == hr_number
+                   for e in out[target]):
+                continue
+            out[target].append(
+                _org_record(name, org_ort, hr_number, _court_city(m.group("court") or ""),
+                            out["unternehmen"]["registergericht"], {"share": 0})
+            )
+            _append_hl(out, name)
+            _append_hl(out, hr_number)
+
+        for m in _HRB_PERSON_RE.finditer(body):
+            groups = m.groupdict()
+            last = re.sub(r"^Dr\.\s*", "", _norm(m.group("nachname"))).strip()
+            first = _norm(m.group("vorname"))
+            raw_ort = groups.get("ort1") or groups.get("ort2") or groups.get("ort3") or ""
+            city, land = _split_ort_land(raw_ort)
+            dob_raw = groups.get("dob1") or groups.get("dob2")
+            dob = _to_iso_date(dob_raw) if dob_raw else None
+
+            full = _norm(f"{first} {last}")
+            if any(p["adresse"]["nameKomplett"] == full
+                   and p["geburtsdatum"] == dob
+                   and p["adresse"]["ort"] == city
+                   for p in out[field]):
+                continue
+
+            out[field].append(
+                _person_record(first, last, city, land, dob,
+                               _get_bundesland(city), {"share": 0})
+            )
+            _append_hl(out, full)
+
+    return out
+
+
+def parse_handelsregister_text(text: str) -> dict:
+    """Parse either department, routing on what the document says it is."""
+    if detect_register_type(text) == "B":
+        return parse_handelsregister_b_text(text)
+    return parse_handelsregister_a_text(text)
+
+
+def parse_handelsregister_or_none(text: str) -> dict | None:
+    """Auto-routing counterpart of parse_handelsregister_a_or_none."""
+    out = parse_handelsregister_text(text)
+    company = out.get("unternehmen", {})
+
+    missing = [f for f in ("name", "handelsregisternummer", "registergericht")
+               if not company.get(f)]
+    if missing:
+        print("[DEBUG] HR parser missing fields:", missing)
+        print("[DEBUG] Parsed company so far:", company)
+        return None
+    return out
+
+
 def parse_handelsregister_a_or_none(text: str) -> dict | None:
     """
     Return parsed output only if the minimum required company fields were found.

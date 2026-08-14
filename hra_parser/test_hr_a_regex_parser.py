@@ -458,6 +458,78 @@ def _():
     assert by_name["Gerrit Brodersen"]["geburtsdatum"] == "1973-09-05"
 
 
+@check("HRB: department detected and routed correctly")
+def _():
+    hrb = """
+    Amtsgericht Flensburg
+    - Handelsregister Abteilung B -
+    HRB 2856 FL
+    2.a) Firma
+    A & B Windenergie GmbH
+    b) Sitz, Niederlassung, inländische Geschäftsanschrift, empfangsberechtigte Person, Zweigniederlassungen
+    Nordhackstedt
+    Schauweg 50, 24980 Nordhackstedt
+    3. Grund- oder Stammkapital
+    50.000,00 DM
+    4.a) Allgemeine Vertretungsregelung
+    Die Gesellschaft hat einen oder mehrere Geschäftsführer.
+    b) Vorstand, Leitungsorgan, geschäftsführende Direktoren, persönlich haftende Gesellschafter,
+    Geschäftsführer, Vertretungsberechtigte und besondere Vertretungsbefugnis
+    Geschäftsführer:
+    mit der Befugnis die Gesellschaft mit einem anderen Geschäftsführer zu vertreten
+    Asmussen, Hans P., Handewitt, Landwirt
+    Brodersen, Gerrit, *05.09.1973, Nordhackstedt
+    6.a) Rechtsform, Beginn, Satzung oder Gesellschaftsvertrag
+    Gesellschaft mit beschränkter Haftung
+    7. Tag der letzten Eintragung
+    24.07.2026
+    """
+    assert P.detect_register_type(hrb) == "B"
+
+    r = P.parse_handelsregister_text(hrb)
+    u = r["unternehmen"]
+    assert u["name"] == "A & B Windenergie GmbH", u["name"]
+    assert u["handelsregisternummer"] == "HRB 2856 FL", u["handelsregisternummer"]
+    # the court city must not absorb the "- Handelsregister Abteilung B -" header
+    assert u["registergericht"] == "Flensburg", u["registergericht"]
+    assert u["adresse"]["strasse"] == "Schauweg", u["adresse"]
+    assert u["adresse"]["plz"] == "24980", u["adresse"]
+
+    names = {x["adresse"]["nameKomplett"] for x in r["leitende_personen"]}
+    assert names == {"Hans P. Asmussen", "Gerrit Brodersen"}, names
+
+    by_name = {x["adresse"]["nameKomplett"]: x for x in r["leitende_personen"]}
+    # no birth date printed for Asmussen; a profession follows instead, which
+    # must not end up in the town field
+    assert by_name["Hans P. Asmussen"]["geburtsdatum"] is None
+    assert by_name["Hans P. Asmussen"]["adresse"]["ort"] == "Handewitt"
+    assert by_name["Gerrit Brodersen"]["geburtsdatum"] == "1973-09-05"
+
+    # an HRB document has no Kommanditisten and no HRA-style partners
+    assert r["kommanditisten_personen"] == []
+    assert r["persoenlich_haftende_gesellschafter"] == []
+
+
+@check("HRA still routes to the A parser (no HRB regression)")
+def _():
+    hra = """
+    Amtsgericht Flensburg
+    - Handelsregister Abteilung A -
+    HRA 8195 FL
+    2. a) Firma: Windpark Enleni GmbH & Co. KG
+    b) Sitz: Behrendorf Geschäftsanschrift: Norderdorf 7, 25850 Behrendorf
+    Persönlich haftender Gesellschafter: Enleni GmbH, Behrendorf (Amtsgericht Flensburg, HRB 10342 FL)
+    c) Kommanditisten, Mitglieder
+    Andresen, Heike Susann, *19.11.1974, Jübek 4.000,00 EUR
+    6. a) Tag der letzten Eintragung: 08.03.2022
+    """
+    assert P.detect_register_type(hra) == "A"
+    r = P.parse_handelsregister_text(hra)
+    assert len(r["persoenlich_haftende_gesellschafter"]) == 1
+    assert len(r["kommanditisten_personen"]) == 1
+    assert r["leitende_personen"] == []
+
+
 @check("full integration: every section present at once, nothing dropped")
 def _():
     doc = """
