@@ -338,7 +338,7 @@ def parse_handelsregister_a_text(text: str) -> dict:
     #    partner company.
     # ------------------------------------------------------------
     komm_match = re.search(
-        r"Kommanditist(?:\(en\)|en)?\s*:\s*(?P<block>.*?)"
+        r"Kommanditist(?:en|\(en\))?(?:\s*,\s*Mitglieder)?\s*:\s*(?P<block>.*?)"
         r"(?=\s*\d+\.\s*[a-z]?\)?\s*Tag der letzten Eintragung|\s*Abruf vom|\Z)",
         t,
         re.S,
@@ -600,7 +600,10 @@ def parse_handelsregister_a_text(text: str) -> dict:
     #   Andresen, Heike Susann, *19.11.1974, Jübek 4.000,00 EUR
     #   Löffelhardt, Robert Gottlieb, Brühl, *13.04.1964, Einlage: 2.985.000,00 DEM
     # ------------------------------------------------------------
-    _MONEY = r"(?:(?:Haftsumme|Einlage)\s*:\s*)?(?P<share>[\d.]+,\d{2})\s*(?P<currency>[A-ZÄÖÜ]{2,3})\b"
+    _MONEY = (
+        r"(?:(?:Haft(?:summe|einlage)|Einlage|Kapitalanteil|Kommanditeinlage)\s*:\s*)?"
+        r"(?P<share>[\d.]+,\d{2})\s*(?P<currency>[A-ZÄÖÜ]{2,3})\b"
+    )
 
     kp_pattern = re.compile(r"(?:Dr\.\s*)?" + _PERSON_ANY + r"\s*,?\s*" + _MONEY, re.S)
 

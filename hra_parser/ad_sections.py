@@ -207,6 +207,22 @@ _ENTITY_LISTS = (
 )
 
 
+def _signal_values(line: str) -> list[str]:
+    """The distinctive values on a line: birth dates, amounts, register numbers."""
+    values: list[str] = []
+
+    for m in re.finditer(r"\*\s*(\d{2}\.\d{2}\.\d{4})", line):
+        values.append(m.group(1))
+
+    for m in re.finditer(r"(?<![\d.,])(\d[\d.]*,\d{2})", line):
+        values.append(m.group(1))
+
+    for m in re.finditer(r"((?:HRA|HRB|GnR|PR|VR)\s*\d+(?:\s+[A-ZÄÖÜ]{1,3})?)", line):
+        values.append(re.sub(r"\s+", " ", m.group(1)))
+
+    return values
+
+
 def _iso_to_german(iso: str) -> str:
     m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", iso or "")
     return f"{m.group(3)}.{m.group(2)}.{m.group(1)}" if m else ""
@@ -267,10 +283,20 @@ def audit_extraction(text: str, parsed: dict) -> dict:
         signal_lines = [ln for ln in section.lines if _SIGNALS.search(ln)]
 
         for line in signal_lines:
-            if not any(tok in line for tok in tokens):
-                missed.append(
-                    {"section": section.key, "title": section.title, "line": line.strip()}
-                )
+            # Check each signal on the line separately. Testing only whether the
+            # line matched *something* hides a half-extracted entry — the right
+            # name with the amount dropped still counts as a miss.
+            unclaimed = [
+                value for value in _signal_values(line)
+                if value not in tokens
+            ]
+            if unclaimed:
+                missed.append({
+                    "section": section.key,
+                    "title": section.title,
+                    "line": line.strip(),
+                    "unclaimed": unclaimed,
+                })
 
         if section.role and signal_lines:
             # A data-bearing section that filled none of its target lists.
@@ -297,6 +323,8 @@ def format_audit(report: dict) -> str:
         for item in report["missed"]:
             out.append(f"  [{item['section']}] {item['title']}")
             out.append(f"      {item['line']}")
+            if item.get("unclaimed"):
+                out.append(f"      -> not in output: {', '.join(item['unclaimed'])}")
     else:
         out.append("UNEXTRACTED LINES (0) — every data line is represented in the output")
 
