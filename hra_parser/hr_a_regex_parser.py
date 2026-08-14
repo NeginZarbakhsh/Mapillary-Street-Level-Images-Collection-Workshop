@@ -542,8 +542,14 @@ def parse_handelsregister_a_text(text: str) -> dict:
         court_city = _norm(m_court.group(1))
 
         # avoid accidentally capturing too much text
+        # Also cut at a spaced dash: the page header runs
+        # "Amtsgericht Flensburg - Handelsregister Abteilung B -" together once
+        # whitespace is collapsed, and the city must not absorb the rest.
+        # A hyphen inside a name ("Baden-Baden") has no surrounding spaces and
+        # is left alone.
         court_city = re.split(
-            r"\s+(Abteilung|Abt\.|Wiedergabe|Nummer|Abdruck|des|HRA|HRB)\b",
+            r"\s+[-–—]\s*"
+            r"|\s+(?:Abteilung|Abt\.|Wiedergabe|Nummer|Abdruck|des|HRA|HRB)\b",
             court_city,
         )[0].strip()
 
