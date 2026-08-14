@@ -397,8 +397,17 @@ def parse_handelsregister_a_text(text: str) -> dict:
     #   komm_block -> text inside PDF  5. c) Kommanditisten, Mitglieder
     #   phg_block  -> text inside PDF  3. b) Inhaber, persoenlich haft...
     # ==========================================================================
+    # The heading carries a colon in the older "Ausdruck" layout
+    # ("Kommanditist(en):") but NOT in the "Aktueller Ausdruck" layout, where
+    # it is a numbered heading printed bare ("c) Kommanditisten, Mitglieder").
+    # Requiring the colon skipped the entire section — and therefore every
+    # Kommanditist in the document — on every colon-less printout, silently.
+    # Hence two alternatives: labelled-with-colon, or lettered heading.
     komm_match = re.search(
-        r"Kommanditist(?:en|\(en\))?(?:\s*,\s*Mitglieder)?\s*:\s*(?P<block>.*?)"
+        r"(?:"
+        r"Kommanditist(?:en|\(en\))?(?:\s*,\s*Mitglieder)?\s*:"
+        r"|(?:\d+\s*\.\s*)?[a-z]\)\s*Kommanditisten(?:\s*,\s*Mitglieder)?\s*:?"
+        r")\s*(?P<block>.*?)"
         r"(?=\s*\d+\.\s*[a-z]?\)?\s*Tag der letzten Eintragung|\s*Abruf vom|\Z)",
         t,
         re.S,
@@ -794,8 +803,12 @@ def parse_handelsregister_a_text(text: str) -> dict:
 
         out["kommanditisten_personen"].append(
             _person_record(
-                first, last, city, land, dob,
-                "",  # XML leaves person bundesland empty
+                first, last, city, land,
+                # Not every Kommanditist has a birth date printed. The XML side
+                # reports null for those, so an absent date must be None here,
+                # not the empty string, or the two disagree on every such entry.
+                dob or None,
+                _get_bundesland(city),
                 {"share": share, "waehrung": currency},
             )
         )

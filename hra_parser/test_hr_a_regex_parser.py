@@ -411,6 +411,53 @@ def _():
     assert P.parse_handelsregister_a_or_none("") is None
 
 
+@check("headings WITHOUT a colon (Aktueller Ausdruck layout)")
+def _():
+    # Real layout: "c) Kommanditisten, Mitglieder" is printed bare, with no
+    # colon, and the list index sits on its own line above each entry.
+    doc = """
+    3.a) Allgemeine Vertretungsregelung
+    Jeder persönlich haftende Gesellschafter vertritt die Gesellschaft allein.
+    b) Inhaber, persönlich haftende Gesellschafter, Geschäftsführer, Vorstand, Vertretungsberechtigte
+    und besondere Vertretungsbefugnis
+    Persönlich haftender Gesellschafter:
+    A & B Windenergie GmbH, Nordhackstedt (Amtsgericht Flensburg, HRB 2856 FL)
+    5.a) Rechtsform, Beginn und Satzung
+    Kommanditgesellschaft
+    c) Kommanditisten, Mitglieder
+    1.
+    Asmussen, Hans-Peter, Handewitt                              306.775,13 EUR
+    3.
+    Brodersen, Gerrit, *05.09.1973, Nordhackstedt                306.775,13 EUR
+    6. Tag der letzten Eintragung
+    13.12.2011
+    """
+    r = P.parse_handelsregister_a_text(doc)
+    assert len(r["kommanditisten_personen"]) == 2, r["kommanditisten_personen"]
+    names = {k["adresse"]["nameKomplett"] for k in r["kommanditisten_personen"]}
+    assert names == {"Hans-Peter Asmussen", "Gerrit Brodersen"}, names
+    phg = r["persoenlich_haftende_gesellschafter"]
+    assert len(phg) == 1 and phg[0]["name"] == "A & B Windenergie GmbH", phg
+
+
+@check("Kommanditist with no printed birth date -> geburtsdatum is None")
+def _():
+    doc = """
+    c) Kommanditisten, Mitglieder
+    1.
+    Asmussen, Hans-Peter, Handewitt                              306.775,13 EUR
+    3.
+    Brodersen, Gerrit, *05.09.1973, Nordhackstedt                306.775,13 EUR
+    6. Tag der letzten Eintragung
+    13.12.2011
+    """
+    r = P.parse_handelsregister_a_text(doc)
+    by_name = {k["adresse"]["nameKomplett"]: k for k in r["kommanditisten_personen"]}
+    # XML reports null for a missing birth date, so None — not "" — is required.
+    assert by_name["Hans-Peter Asmussen"]["geburtsdatum"] is None, by_name["Hans-Peter Asmussen"]
+    assert by_name["Gerrit Brodersen"]["geburtsdatum"] == "1973-09-05"
+
+
 @check("full integration: every section present at once, nothing dropped")
 def _():
     doc = """
