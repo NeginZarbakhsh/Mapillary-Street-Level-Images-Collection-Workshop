@@ -100,8 +100,14 @@ _ORG_WITH_REGISTER = re.compile(
 # and the entry then looks like a person with no birth date.
 _DATE = r"\d{2}\.\d{2}\.\d{4}"
 _PLACE = r"[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-./ ]*?"
+# German civil-register surnames sometimes carry a lower-case particle
+# ("von Bülow", "van der Berg", "zu Guttenberg"). Without this, the particle
+# fails to match (it's followed by a space, not the comma the pattern needs
+# next) and the surname is silently truncated to whatever follows it.
+_SURNAME_PARTICLE = r"(?:(?:von|van|de|zu|zur|zum|di|la|le|del|der)\s+)*"
+
 _NAME_HEAD = (
-    r"(?P<nachname>[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-']*)\s*,\s*"
+    rf"(?P<nachname>{_SURNAME_PARTICLE}[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-']*)\s*,\s*"
     r"(?P<vorname>[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-'. ]*?)\s*,\s*"
 )
 
@@ -522,7 +528,12 @@ def parse_handelsregister_a_text(text: str) -> dict:
             continue  # no birth date -> not a person entry
 
         full = _norm(f"{first} {last}")
-        if any(p["adresse"]["nameKomplett"] == full for p in out["prokuristen"]):
+        if any(
+            p["adresse"]["nameKomplett"] == full
+            and p["geburtsdatum"] == dob
+            and p["adresse"]["ort"] == city
+            for p in out["prokuristen"]
+        ):
             continue
 
         out["prokuristen"].append(
@@ -538,7 +549,26 @@ def parse_handelsregister_a_text(text: str) -> dict:
     # Persönlich haftender Gesellschafter: PUTSCH Verwaltungsgesellschaft mbH,
     # Kaiserslautern (Amtsgericht Kaiserslautern HRB 11792)
     # ------------------------------------------------------------
-    phg_block = t[phg_marker.start(): komm_start] if phg_marker else ""
+    # phg_block must stop at the NEXT section, not just run to Kommanditisten:
+    # a "4. Prokura:" block commonly sits between the PHG label and the
+    # Kommanditisten section, and since natural-person PHGs are now matched
+    # anywhere in phg_block (see below), an unbounded block would pull the
+    # Prokuristen in as well.
+    _NEXT_SECTION_RE = re.compile(
+        r"Prokura\s*:"
+        r"|Kommanditist"
+        r"|Rechtsform"
+        r"|Sonstige\s+Rechtsverhältnisse"
+        r"|Tag\s+der\s+letzten\s+Eintragung"
+        r"|Abruf\s+vom"
+    )
+    phg_end = komm_start
+    if phg_marker:
+        boundary = _NEXT_SECTION_RE.search(t, phg_marker.end())
+        if boundary and boundary.start() < phg_end:
+            phg_end = boundary.start()
+
+    phg_block = t[phg_marker.start(): phg_end] if phg_marker else ""
 
     for match in _ORG_WITH_REGISTER.finditer(phg_block):
         name = _clean_company_name(match.group("name"))
@@ -572,18 +602,27 @@ def parse_handelsregister_a_text(text: str) -> dict:
     # 5b) Natural-person PHGs
     # Persönlich haftender Gesellschafter: Becker, Herta, Köln, *11.05.1957
     # ------------------------------------------------------------
-    phg_person_pattern = re.compile(
-        r"Persönlich haftende[rn]?\s+Gesellschafter(?:in)?\s*:\s*(?:Dr\.\s*)?" + _PERSON_WITH_DOB,
-        re.S,
-    )
+    # Scanning phg_block (not requiring the label immediately before each
+    # person) matters: a document that lists several natural-person partners
+    # under one label ("Persönlich haftende Gesellschafter: Müller, Hans, ...
+    # und Müller, Petra, ...") only has the label once. Anchoring on the label
+    # per-entry, as this used to, silently drops every partner after the
+    # first. Kommanditisten and Prokuristen already use this block-scan
+    # design; this brings PHGs in line with them.
+    phg_person_pattern = re.compile(r"(?:Dr\.\s*)?" + _PERSON_WITH_DOB, re.S)
 
-    for m in phg_person_pattern.finditer(t):
+    for m in phg_person_pattern.finditer(phg_block):
         first, last, city, land, dob = _person_from_match(m)
         if not dob:
             continue  # a company entry, handled above
 
         full = _norm(f"{first} {last}")
-        if any(p["adresse"]["nameKomplett"] == full for p in out["natuerliche_phGs"]):
+        if any(
+            p["adresse"]["nameKomplett"] == full
+            and p["geburtsdatum"] == dob
+            and p["adresse"]["ort"] == city
+            for p in out["natuerliche_phGs"]
+        ):
             continue
 
         out["natuerliche_phGs"].append(
@@ -613,7 +652,12 @@ def parse_handelsregister_a_text(text: str) -> dict:
         share = _german_money_to_en(m.group("share"))
         currency = _norm(m.group("currency")).upper()
 
-        if any(p["adresse"]["nameKomplett"] == full for p in out["kommanditisten_personen"]):
+        if any(
+            p["adresse"]["nameKomplett"] == full
+            and p["geburtsdatum"] == dob
+            and p["adresse"]["ort"] == city
+            for p in out["kommanditisten_personen"]
+        ):
             continue
 
         out["kommanditisten_personen"].append(
