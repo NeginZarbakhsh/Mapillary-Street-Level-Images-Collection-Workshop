@@ -330,6 +330,54 @@ def parse_handelsregister_a_text(text: str) -> dict:
     Handles both printout layouts:
     - "Ausdruck" with inline labels ("Nummer der Firma:", "Kommanditist(en):")
     - "Aktueller Ausdruck" with numbered headings ("2. a) Firma", "c) Kommanditisten")
+
+    ------------------------------------------------------------------------
+    MAP: PDF SECTION  ->  WHAT THIS FUNCTION DOES WITH IT
+    ------------------------------------------------------------------------
+    Open an AD printout beside this file. Every numbered heading in the
+    document maps to exactly one labelled block below, in the same order.
+
+      page header / "Nummer der Firma:"
+                             -> unternehmen.registergericht
+                                unternehmen.handelsregisternummer   [STEP 1]
+
+      1.    Anzahl der bisherigen Eintragungen
+                             -> NOT EXTRACTED (no field in the schema)
+
+      2. a) Firma            -> unternehmen.name, .rechtsform        [STEP 2]
+         b) Sitz, Niederlassung, inlaendische Geschaeftsanschrift
+                             -> unternehmen.adresse.*                [STEP 3]
+         c) Gegenstand des Unternehmens
+                             -> NOT EXTRACTED (no field in the schema)
+
+      3. a) Allgemeine Vertretungsregelung
+                             -> NOT EXTRACTED (no field in the schema)
+         b) Inhaber, persoenlich haftende Gesellschafter, ...
+                             -> persoenlich_haftende_gesellschafter  [STEP 5]
+                                natuerliche_phGs                     [STEP 5b]
+
+      4.    Prokura          -> prokuristen                          [STEP 4b]
+
+      5. a) Rechtsform, Beginn und Satzung
+                             -> unternehmen.rechtsform (fallback)    [STEP 4]
+         b) Sonstige Rechtsverhaeltnisse
+                             -> NOT EXTRACTED (no field in the schema)
+         c) Kommanditisten, Mitglieder
+                             -> kommanditisten_personen              [STEP 6]
+                                kommanditisten_gesellschaften        [STEP 6]
+
+      6. a) Tag der letzten Eintragung
+                             -> parsed, then deliberately blanked    [STEP 4]
+
+    The older "Ausdruck" layout numbers its sections differently (e.g.
+    Kommanditisten may sit under "4." instead of "5. c)"), which is why each
+    block below matches on the heading TEXT, never on the number.
+
+    Fields never written by any block, whatever the PDF says:
+      leitende_personen, board, company_owner, vertreter,
+      persoenlich_haftende_gesellschafter_ohne_vertretung,
+      natuerliche_phGs_ohne_vertretung, unternehmen.geschaeftsfuehrer
+    ------------------------------------------------------------------------
     """
     out = deepcopy(BASE_OUTPUT)
     text = html.unescape(text or "")
@@ -338,11 +386,17 @@ def parse_handelsregister_a_text(text: str) -> dict:
     t = t.replace("**", " ")
     t = re.sub(r"\s+", " ", t)
 
-    # ------------------------------------------------------------
-    # 0) Section boundaries — used to keep partner entries from leaking between
-    #    sections, and to stop the company register number being read off a
-    #    partner company.
-    # ------------------------------------------------------------
+    # ==========================================================================
+    # STEP 0 - LOCATE SECTION BOUNDARIES (no extraction happens here)
+    #
+    # Finds where each PDF section starts and stops, so that later blocks
+    # only ever read inside their own section. Without this, a partner's
+    # own register number could be taken as the company's, and the
+    # Prokura people (PDF 4.) could be counted as partners (PDF 3. b).
+    #
+    #   komm_block -> text inside PDF  5. c) Kommanditisten, Mitglieder
+    #   phg_block  -> text inside PDF  3. b) Inhaber, persoenlich haft...
+    # ==========================================================================
     komm_match = re.search(
         r"Kommanditist(?:en|\(en\))?(?:\s*,\s*Mitglieder)?\s*:\s*(?P<block>.*?)"
         r"(?=\s*\d+\.\s*[a-z]?\)?\s*Tag der letzten Eintragung|\s*Abruf vom|\Z)",
@@ -384,9 +438,18 @@ def parse_handelsregister_a_text(text: str) -> dict:
         + t[komm_end:]
     )
 
-    # ------------------------------------------------------------
-    # 1) Court and main register number
-    # ------------------------------------------------------------
+    # ==========================================================================
+    # STEP 1 - PDF page header, and/or the line 'Nummer der Firma:'
+    #
+    # Reads : the court name, and the company's OWN register number
+    # Writes: unternehmen.registergericht
+    #         unternehmen.amtsgericht_verbatim
+    #         unternehmen.handelsregisternummer
+    #
+    # The number is looked for in three places, best first, so that a
+    # partner company's HRB (printed later, in PDF 3. b) can never be
+    # mistaken for this company's own number.
+    # ==========================================================================
     m_court = re.search(r"Amtsgerichts?\s+([A-Za-zÄÖÜäöüß\- ]+?)(?=\n|,|$)", t)
 
     if not m_court:
@@ -425,9 +488,15 @@ def parse_handelsregister_a_text(text: str) -> dict:
         out["unternehmen"]["handelsregisternummer"] = hr_number
         _append_hl(out, hr_number)
 
-    # ------------------------------------------------------------
-    # 2) Company name, section 2a
-    # ------------------------------------------------------------
+    # ==========================================================================
+    # STEP 2 - PDF SECTION  2. a) Firma
+    #
+    # Reads : the company's own name, e.g.
+    #           Windpark Enleni GmbH & Co. KG
+    # Writes: unternehmen.name
+    #         unternehmen.adresse.nameKomplett
+    #         unternehmen.rechtsform   (derived from the name text)
+    # ==========================================================================
     m_name = re.search(
         r"2\.\s*a\)\s*Firma:?\s*(.+?)(?=\s*b\)\s*Sitz|\s*b\))",
         t,
@@ -445,9 +514,19 @@ def parse_handelsregister_a_text(text: str) -> dict:
 
         _append_hl(out, company_name)
 
-    # ------------------------------------------------------------
-    # 3) Seat and business address, section 2b
-    # ------------------------------------------------------------
+    # ==========================================================================
+    # STEP 3 - PDF SECTION  2. b) Sitz, Niederlassung, inlaendische
+    #                             Geschaeftsanschrift, Zweigniederlassungen
+    #
+    # Reads : the seat town, then the street address, e.g.
+    #           Behrendorf
+    #           Geschaeftsanschrift: Norderdorf 7, 25850 Behrendorf
+    # Writes: unternehmen.adresse.ort / .strasse / .hausnummer
+    #         unternehmen.adresse.plz / .bundesland
+    #
+    # Two attempts: the labelled 'Geschaeftsanschrift:' form first, then a
+    # looser fallback for documents that omit that exact label.
+    # ==========================================================================
     m_sitz = re.search(
         r"b\)\s*Sitz.*?:\s*([A-Za-zÄÖÜäöüß\- ]+)\s*Geschäftsanschrift:",
         t,
@@ -512,9 +591,18 @@ def parse_handelsregister_a_text(text: str) -> dict:
 
             _append_hl(out, f"{street} {house_number}, {post_code} {city}")
 
-    # ------------------------------------------------------------
-    # 4) Legal form, beginning date, last change, retrieval date
-    # ------------------------------------------------------------
+    # ==========================================================================
+    # STEP 4 - PDF SECTION  5. a) Rechtsform, Beginn und Satzung
+    #          PDF SECTION  6. a) Tag der letzten Eintragung
+    #
+    # Reads : the legal form ('Kommanditgesellschaft'), and the two dates
+    # Writes: unternehmen.rechtsform  - ONLY as a fallback, when STEP 2
+    #                                   could not derive it from the name
+    #
+    # The two dates are parsed and then deliberately blanked again, to
+    # match what the XML side currently returns. That is a parity choice,
+    # not a bug - see the '*****' comment below.
+    # ==========================================================================
     if not out["unternehmen"]["rechtsform"]:
         m_form = re.search(
             r"\d\.\s*a\)\s*Rechtsform[^:]*:?\s*(.+?)\s*(?=Beginn:|b\)|c\)|\d\.\s|$)",
@@ -533,11 +621,19 @@ def parse_handelsregister_a_text(text: str) -> dict:
     # if abruf_dates:
     #     _append_hl(out, f"Abruf vom {abruf_dates[-1]}")
 
-    # ------------------------------------------------------------
-    # 4b) Prokuristen / Procurists
-    # Example:
-    # Dr. Kadletz, Andreas, Stuttgart, *09.01.1969
-    # ------------------------------------------------------------
+    # ==========================================================================
+    # STEP 4b - PDF SECTION  4. Prokura
+    #
+    # Reads : every person listed as holding power of attorney, e.g.
+    #           Dr. Kadletz, Andreas, Stuttgart, *09.01.1969
+    #           Klatt, Fabian Michael, Stuttgart, *27.04.1986
+    # Writes: prokuristen[]
+    #
+    # Isolates the section once, then scans the WHOLE block, so a section
+    # listing several people yields all of them, not just the first.
+    # A birth date is required - that is what stops the heading text
+    # itself from being read as a person.
+    # ==========================================================================
     prokura_match = re.search(
         r"\d+\.\s*Prokura\s*:?\s*(?P<block>.*?)(?=\s*\d+\.\s*a\)|\s*\d+\.\s+[A-ZÄÖÜ]|\Z)",
         t,
@@ -570,11 +666,18 @@ def parse_handelsregister_a_text(text: str) -> dict:
         # _append_hl(out, full)
         # _append_hl(out, city)
 
-    # ------------------------------------------------------------
-    # 5) Personally liable partners (COMPANY form)
-    # Persönlich haftender Gesellschafter: PUTSCH Verwaltungsgesellschaft mbH,
-    # Kaiserslautern (Amtsgericht Kaiserslautern HRB 11792)
-    # ------------------------------------------------------------
+    # ==========================================================================
+    # STEP 5 - PDF SECTION  3. b) Inhaber, persoenlich haftende
+    #                             Gesellschafter, ...   (COMPANY entries)
+    #
+    # Reads : every general partner that is a COMPANY, e.g.
+    #           PUTSCH Verwaltungsgesellschaft mbH, Kaiserslautern
+    #             (Amtsgericht Kaiserslautern HRB 11792)
+    # Writes: persoenlich_haftende_gesellschafter[]
+    #
+    # A company is recognised by the '(... HR-number)' parenthetical, NOT
+    # by seeing 'GmbH' in the name - so an AG or an e.K. is caught too.
+    # ==========================================================================
     # phg_block stops at the NEXT section (Prokura/Kommanditist/...), not just
     # at Kommanditisten start: a "4. Prokura:" block commonly sits in between,
     # and since natural-person PHGs are matched anywhere in phg_block (below),
@@ -610,10 +713,19 @@ def parse_handelsregister_a_text(text: str) -> dict:
         if court_city:
             _append_hl(out, f"Amtsgericht {court_city}")
 
-    # ------------------------------------------------------------
-    # 5b) Natural-person PHGs
-    # Persönlich haftender Gesellschafter: Becker, Herta, Köln, *11.05.1957
-    # ------------------------------------------------------------
+    # ==========================================================================
+    # STEP 5b - PDF SECTION  3. b) Inhaber, persoenlich haftende
+    #                              Gesellschafter, ...   (PERSON entries)
+    #
+    # Same PDF section as STEP 5, second pass - this one picks up general
+    # partners who are PEOPLE rather than companies, e.g.
+    #           Persoenlich haftender Gesellschafter:
+    #             Becker, Herta, Koeln, *11.05.1957
+    # Writes: natuerliche_phGs[]
+    #
+    # A birth date is required, which is also what separates a person
+    # entry here from a company entry already taken by STEP 5.
+    # ==========================================================================
     # Scanning phg_block (not requiring the label immediately before each
     # person) matters: a document that lists several natural-person partners
     # under one label ("Persönlich haftende Gesellschafter: Müller, Hans, ...
@@ -644,8 +756,16 @@ def parse_handelsregister_a_text(text: str) -> dict:
         # _append_hl(out, full)
         # _append_hl(out, city)
 
-    # ------------------------------------------------------------
-    # 6) Limited partners / Kommanditisten
+    # ==========================================================================
+    # STEP 6 - PDF SECTION  5. c) Kommanditisten, Mitglieder
+    #                       (older layout: '4. Kommanditist(en):')
+    #
+    # Reads : every limited partner, PEOPLE and COMPANIES, each with the
+    #         capital contribution printed beside it
+    # Writes: kommanditisten_personen[]        (first pass, below)
+    #         kommanditisten_gesellschaften[]  (second pass, below)
+    # ==========================================================================
+    # Printed forms this has to survive:
     # Printed forms this has to survive:
     #   Hellmich, Walter Georg, Luxemburg / Luxemburg, *24.03.1944, Haftsumme: 1.000.000,00 EUR
     #   Andresen, Heike Susann, *19.11.1974, Jübek 4.000,00 EUR
@@ -684,7 +804,9 @@ def parse_handelsregister_a_text(text: str) -> dict:
         _append_hl(out, city)
         _append_hl(out, f"{share} {currency}")
 
-    # ---- Company Kommanditisten ----
+    # ---- STEP 6, second pass: COMPANY Kommanditisten -------------------
+    # Same PDF section (5. c), but matching the company shape
+    # "Name, Town (Amtsgericht X, HRA nnnn)" plus an optional amount.
     kg_pattern = re.compile(_ORG_WITH_REGISTER.pattern + r"\s*,?\s*(?:" + _MONEY + r")?", re.S)
 
     for match in kg_pattern.finditer(komm_block):
