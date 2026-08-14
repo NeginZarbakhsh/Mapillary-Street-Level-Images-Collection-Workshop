@@ -358,6 +358,32 @@ def parse_handelsregister_a_text(text: str) -> dict:
     )
     head = t[: phg_marker.start()] if phg_marker else t[:komm_start]
 
+    # Full span covering both partner sections, so a register number that only
+    # appears inside a partner's own entry is never mistaken for the
+    # company's. Computed once here; section 5 reuses phg_end for its block.
+    _NEXT_SECTION_RE = re.compile(
+        r"Prokura\s*:"
+        r"|Kommanditist"
+        r"|Rechtsform"
+        r"|Sonstige\s+Rechtsverhältnisse"
+        r"|Tag\s+der\s+letzten\s+Eintragung"
+        r"|Abruf\s+vom"
+    )
+    phg_end = komm_start
+    if phg_marker:
+        boundary = _NEXT_SECTION_RE.search(t, phg_marker.end())
+        if boundary and boundary.start() < phg_end:
+            phg_end = boundary.start()
+
+    komm_end = komm_match.end() if komm_match else komm_start
+    outside_partners = (
+        (t[:phg_marker.start()] if phg_marker else t[:komm_start])
+        + " "
+        + t[max(phg_end, komm_start):komm_start]  # rarely non-empty; kept for safety
+        + " "
+        + t[komm_end:]
+    )
+
     # ------------------------------------------------------------
     # 1) Court and main register number
     # ------------------------------------------------------------
@@ -392,7 +418,7 @@ def parse_handelsregister_a_text(text: str) -> dict:
         m_hr = re.search(rf"\b({_HR_NUMBER})(?![A-Za-zÄÖÜäöüß])", head)
 
     if not m_hr:
-        m_hr = re.search(rf"\b({_HR_NUMBER})(?![A-Za-zÄÖÜäöüß])", t)
+        m_hr = re.search(rf"\b({_HR_NUMBER})(?![A-Za-zÄÖÜäöüß])", outside_partners)
 
     if m_hr:
         hr_number = re.sub(r"\s+", " ", _norm(m_hr.group(1)))
@@ -549,25 +575,11 @@ def parse_handelsregister_a_text(text: str) -> dict:
     # Persönlich haftender Gesellschafter: PUTSCH Verwaltungsgesellschaft mbH,
     # Kaiserslautern (Amtsgericht Kaiserslautern HRB 11792)
     # ------------------------------------------------------------
-    # phg_block must stop at the NEXT section, not just run to Kommanditisten:
-    # a "4. Prokura:" block commonly sits between the PHG label and the
-    # Kommanditisten section, and since natural-person PHGs are now matched
-    # anywhere in phg_block (see below), an unbounded block would pull the
-    # Prokuristen in as well.
-    _NEXT_SECTION_RE = re.compile(
-        r"Prokura\s*:"
-        r"|Kommanditist"
-        r"|Rechtsform"
-        r"|Sonstige\s+Rechtsverhältnisse"
-        r"|Tag\s+der\s+letzten\s+Eintragung"
-        r"|Abruf\s+vom"
-    )
-    phg_end = komm_start
-    if phg_marker:
-        boundary = _NEXT_SECTION_RE.search(t, phg_marker.end())
-        if boundary and boundary.start() < phg_end:
-            phg_end = boundary.start()
-
+    # phg_block stops at the NEXT section (Prokura/Kommanditist/...), not just
+    # at Kommanditisten start: a "4. Prokura:" block commonly sits in between,
+    # and since natural-person PHGs are matched anywhere in phg_block (below),
+    # an unbounded block would pull the Prokuristen in as well. phg_end was
+    # computed above, alongside phg_marker.
     phg_block = t[phg_marker.start(): phg_end] if phg_marker else ""
 
     for match in _ORG_WITH_REGISTER.finditer(phg_block):
