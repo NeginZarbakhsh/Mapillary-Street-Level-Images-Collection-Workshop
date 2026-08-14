@@ -87,8 +87,8 @@ _HR_NUMBER = r"(?:HRA|HRB|GnR|PR|VR)\s*\d+(?:\s+[A-ZÄÖÜ]{1,3})?"
 # suffix in the name — an "AG", "e.K." or "Stiftung & Co. KG" is matched just as
 # well as a GmbH.
 _ORG_WITH_REGISTER = re.compile(
-    r"(?P<name>[^,()]+?)\s*,\s*"
-    r"(?P<ort>[^,()]+?)\s*"
+    r"(?P<name>[^,():]+?)\s*,\s*"
+    r"(?P<ort>[^,():]+?)\s*"
     r"\(\s*(?:(?P<court>(?:Amtsgericht|AG)\s+[^,()]*?)\s*,?\s*)?"
     rf"(?P<hr>{_HR_NUMBER})\s*\)"
 )
