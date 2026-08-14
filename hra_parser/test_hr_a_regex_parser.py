@@ -530,6 +530,55 @@ def _():
     assert r["leitende_personen"] == []
 
 
+@check("e.K. sole trader: Inhaber goes to company_owner, with birth name")
+def _():
+    doc = """
+    Handelsregister A des Amtsgerichts Jena
+    Nummer der Firma: HRA 504918
+    2. a) Firma: "Autohaus Karl-Heinz Geffe", Silke Speer e.K.
+    b) Sitz, Niederlassung, inländische Geschäftsanschrift, Zweigniederlassungen:
+    Friedrichroda
+    Geschäftsanschrift: Cumbacher Straße 17, 99894 Friedrichroda OT Ernstroda
+    3. a) Allgemeine Vertretungsregelung: Der Inhaber / die Inhaberin handelt allein.
+    b) Inhaber, persönlich haftende Gesellschafter, Geschäftsführer, Vorstand, Vertretungsberechtigte und besondere Vertretungsbefugnis:
+    Inhaber: Speer, Silke, geb. Geffe, Friedrichroda OT Ernstroda, *08.12.1967
+    4. Prokura: ---
+    5. a) Rechtsform, Beginn und Satzung: Einzelkaufmann / Einzelkauffrau
+    c) Kommanditisten, Mitglieder: ---
+    6. a) Tag der letzten Eintragung: 09.05.2019
+    """
+    r = P.parse_handelsregister_text(doc)
+
+    assert len(r["company_owner"]) == 1, r["company_owner"]
+    owner = r["company_owner"][0]
+    assert owner["adresse"]["nameKomplett"] == "Silke Speer", owner
+    assert owner["vorname"] == "Silke" and owner["nachname"] == "Speer", owner
+    assert owner["geburtsdatum"] == "1967-12-08", owner
+    assert owner["adresse"]["ort"] == "Friedrichroda OT Ernstroda", owner["adresse"]
+    # the married-name segment must be captured, not read as a surname
+    assert owner.get("geburtsname") == "Geffe", owner
+
+    # and it must NOT also land in the partner list
+    assert r["natuerliche_phGs"] == [], r["natuerliche_phGs"]
+    assert r["persoenlich_haftende_gesellschafter"] == []
+
+
+@check("an ordinary person record carries no geburtsname key")
+def _():
+    doc = """
+    Nummer der Firma: HRA 777
+    2. a) Firma: Ohne Geburtsname KG
+    b) Sitz: Kiel Geschäftsanschrift: Hafenstraße 1, 24103 Kiel
+    c) Kommanditisten, Mitglieder
+    Weber, Klaus, Kiel, *01.01.1960, Haftsumme: 1.000,00 EUR
+    6. a) Tag der letzten Eintragung: 01.01.2024
+    """
+    r = P.parse_handelsregister_text(doc)
+    k = r["kommanditisten_personen"][0]
+    # the XML side omits the field entirely when no birth name is printed
+    assert "geburtsname" not in k, k
+
+
 @check("full integration: every section present at once, nothing dropped")
 def _():
     doc = """

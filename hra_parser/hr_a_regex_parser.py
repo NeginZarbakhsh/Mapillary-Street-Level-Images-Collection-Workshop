@@ -106,9 +106,14 @@ _PLACE = r"[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-./ ]*?"
 # next) and the surname is silently truncated to whatever follows it.
 _SURNAME_PARTICLE = r"(?:(?:von|van|de|zu|zur|zum|di|la|le|del|der)\s+)*"
 
+# A married name is printed as "Speer, Silke, geb. Geffe, <town>, *<date>".
+# The segment sits between the given name and the town, so without it the
+# pattern breaks and — worse — a later match can read the birth name itself
+# as somebody's surname.
 _NAME_HEAD = (
     rf"(?P<nachname>{_SURNAME_PARTICLE}[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-']*)\s*,\s*"
     r"(?P<vorname>[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-'. ]*?)\s*,\s*"
+    r"(?:geb\.?\s*(?P<geburtsname>[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-']*)\s*,\s*)?"
 )
 
 # Birth date required — used where nothing else anchors the end of the entry.
@@ -282,8 +287,20 @@ def _person_from_match(m) -> tuple[str, str, str, str, str]:
     return first, last, city, land, (_to_iso_date(dob_raw) if dob_raw else "")
 
 
-def _person_record(first, last, city, land, dob, bundesland, beteiligung) -> dict:
-    return {
+def _geburtsname(m) -> str:
+    """The 'geb. X' birth name, when the entry printed one."""
+    return _norm(m.groupdict().get("geburtsname") or "")
+
+
+def _person_record(first, last, city, land, dob, bundesland, beteiligung,
+                   geburtsname: str = "") -> dict:
+    """One person, in the shared schema shape.
+
+    ``geburtsname`` is added as a key only when the document printed one: the
+    XML side omits the field entirely otherwise, and an always-present key
+    would make every ordinary person record differ.
+    """
+    record = {
         "name": "",
         "handelsregisternummer": "",
         "geburtsdatum": dob,
@@ -301,6 +318,11 @@ def _person_record(first, last, city, land, dob, bundesland, beteiligung) -> dic
         "vorname": first,
         "nachname": last,
     }
+
+    if geburtsname:
+        record["geburtsname"] = geburtsname
+
+    return record
 
 
 def _org_record(name, ort, hr_number, court_city, fallback_court, beteiligung) -> dict:
@@ -820,23 +842,44 @@ def parse_handelsregister_a_text(text: str) -> dict:
     # design; this brings PHGs in line with them.
     phg_person_pattern = re.compile(r"(?:Dr\.\s*)?" + _PERSON_WITH_DOB, re.S)
 
-    for m in phg_person_pattern.finditer(phg_block):
-        first, last, city, land, dob = _person_from_match(m)
-        if not dob:
-            continue  # a company entry, handled above
+    # Split the block at its role labels, so an "Inhaber:" person lands in
+    # company_owner while "Persönlich haftender Gesellschafter:" stays with the
+    # partners. Text before the first label keeps the partner default.
+    _runs: list[tuple[str, str]] = []
+    _labels = list(_HRA_ROLE_LABEL_RE.finditer(phg_block))
 
-        full = _norm(f"{first} {last}")
-        if any(
-            p["adresse"]["nameKomplett"] == full
-            and p["geburtsdatum"] == dob
-            and p["adresse"]["ort"] == city
-            for p in out["natuerliche_phGs"]
-        ):
-            continue
+    if _labels:
+        if _labels[0].start() > 0:
+            _runs.append(("", phg_block[: _labels[0].start()]))
+        for _i, _lab in enumerate(_labels):
+            _stop = _labels[_i + 1].start() if _i + 1 < len(_labels) else len(phg_block)
+            _runs.append((_lab.group("role").lower(), phg_block[_lab.end(): _stop]))
+    else:
+        _runs.append(("", phg_block))
 
-        out["natuerliche_phGs"].append(
-            _person_record(first, last, city, land, dob, _get_bundesland(city), {"share": 0})
+    for _role, _body in _runs:
+        _field = HRA_ROLE_TO_PERSON_FIELD.get(
+            re.sub(r"\s+", " ", _role).strip(), _HRA_DEFAULT_PERSON_FIELD
         )
+
+        for m in phg_person_pattern.finditer(_body):
+            first, last, city, land, dob = _person_from_match(m)
+            if not dob:
+                continue  # a company entry, handled above
+
+            full = _norm(f"{first} {last}")
+            if any(
+                p["adresse"]["nameKomplett"] == full
+                and p["geburtsdatum"] == dob
+                and p["adresse"]["ort"] == city
+                for p in out[_field]
+            ):
+                continue
+
+            out[_field].append(
+                _person_record(first, last, city, land, dob, _get_bundesland(city),
+                               {"share": 0}, _geburtsname(m))
+            )
 
         # _append_hl(out, full)
         # _append_hl(out, city)
@@ -966,6 +1009,22 @@ HRB_ROLE_TO_FIELD = {
 }
 
 _HRB_DEFAULT_FIELD = "leitende_personen"
+
+# Abteilung A section 3. b) carries a role label of its own. On a sole trader
+# (e.K. / Einzelkaufmann) it reads "Inhaber:" and the XML side files that
+# person under company_owner, not under the partner lists.
+_HRA_ROLE_LABEL_RE = re.compile(
+    r"(?P<role>Inhaber(?:in)?"
+    r"|Persönlich haftende[rn]?\s+Gesellschafter(?:in)?"
+    r")\s*:"
+)
+
+HRA_ROLE_TO_PERSON_FIELD = {
+    "inhaber": "company_owner",     # confirmed against a real XML output
+    "inhaberin": "company_owner",
+}
+
+_HRA_DEFAULT_PERSON_FIELD = "natuerliche_phGs"
 
 # A surname must begin with a capital (after any lower-case particle). The HRA
 # patterns are looser, which is safe there because a birth date is required;
