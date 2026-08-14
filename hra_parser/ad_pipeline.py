@@ -302,6 +302,21 @@ def parse_ad_pdf(source) -> AdResult:
     )
 
 
+def parse_ad_text(text: str) -> AdResult:
+    """Parse text you already extracted yourself.
+
+    Use this when the PDF is read by your own pipeline (kyc_assistant's
+    pdf_processor, say) and you only want the normalising, parsing and
+    completeness checks. Output is identical to parse_ad_pdf on the same
+    document; only the page-level check is absent, since there is no PDF here
+    to inspect.
+
+    Normalising is idempotent, so passing text your own step already cleaned
+    is safe.
+    """
+    return parse_ad_pdf(text)
+
+
 def _read_source(source) -> str:
     if isinstance(source, Path) or (
         isinstance(source, str) and "\n" not in source and len(source) < 400
