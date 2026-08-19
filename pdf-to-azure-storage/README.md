@@ -221,14 +221,39 @@ whole collection) is too big to hand over in one piece.
 ## Step 7: Embedding, search, and asking a question
 
 This is the last stretch — turning your chunks into something searchable,
-then actually asking a question. **None of this needs Azure.** It needs two
-other things instead:
+then actually asking a question. It needs two things:
 
 1. **A Voyage AI key**, for turning text into the "meaning as numbers"
    embeddings — Anthropic's recommended embedding provider. Sign-up steps
    below.
-2. **The Anthropic key you already have** (`ANTHROPIC_API_KEY`), for the
-   final step where Claude actually reads the matched chunks and answers.
+2. **An answer engine** — something that actually reads the matched chunks
+   and writes the answer. Two options, pick whichever you have access to:
+   - **Claude, via `ANTHROPIC_API_KEY`** (console.anthropic.com), or
+   - **A model deployed in your own Azure account**, via
+     `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`.
+     `vector_search.py` checks for the Azure variables first and uses that
+     automatically if they're set — you don't need to choose in code,
+     just fill in whichever section of `.env` matches what you have.
+
+### Setting up Azure OpenAI instead of Anthropic (if that's what your sandbox gives you)
+
+1. In the Azure Portal, search **"Azure OpenAI"** (or **"Azure AI Foundry"**)
+   and create a resource — this is the same kind of step as creating the
+   storage account in Step 2, and is subject to the same sandbox-expiry
+   warning at the top of this file.
+2. Inside it, go to **Deployments** and deploy a chat model (e.g. `gpt-4o`).
+   **Note the deployment name you give it** — that's what
+   `AZURE_OPENAI_DEPLOYMENT` needs, not the model's own name.
+3. Back on the resource's overview page, open **Keys and Endpoint** and copy
+   both the key and the endpoint URL into `.env`.
+
+This uses Azure's newer v1 API, which doesn't need a dated `api_version`
+parameter that goes stale over time — one less thing to maintain.
+
+**Using Azure OpenAI means your answers come from a different company's
+model (OpenAI's GPT), not Claude.** Same job, same prompt, different model
+underneath — worth knowing if you're comparing answer quality against
+anything you tested earlier with Claude.
 
 ### Setting up Voyage AI (~2 minutes, separate from your Anthropic key)
 
@@ -267,10 +292,11 @@ python3 vector_search.py ask "How many votes does a member have?" --top-k 3
 ```
 
 This embeds your question, shows you the closest-matching chunks (so you can
-see *what* it's about to hand to Claude, not just trust it blindly), and —
-if `ANTHROPIC_API_KEY` is set — sends those chunks to Claude and prints the
-answer. If it isn't set, it stops after showing you the matched chunks,
-rather than failing confusingly.
+see *what* it's about to hand to the model, not just trust it blindly), and
+— if either Claude or Azure OpenAI credentials are set — sends those chunks
+over and prints the answer, naming which engine answered. If neither is set,
+it stops after showing you the matched chunks, rather than failing
+confusingly.
 
 This version keeps things simple — a plain text answer, no page-citation
 verification against the source. The more rigorous version, which checks

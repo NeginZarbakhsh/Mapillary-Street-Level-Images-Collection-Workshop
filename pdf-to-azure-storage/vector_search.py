@@ -129,24 +129,83 @@ def search(question: str, index_path: str, top_k: int) -> list:
     return scored[:top_k]
 
 
-def ask_claude(question: str, matched_chunks: list) -> str:
+def using_azure_openai() -> bool:
+    """True when Azure OpenAI credentials are present -- this is what decides
+    which of the two branches in `ask_model` runs. Checked *before*
+    ANTHROPIC_API_KEY so that on a machine with only Azure access (e.g. a
+    sandbox with no Anthropic account), the script picks Azure automatically
+    rather than telling you to set a key you can't get.
+    """
+    return bool(os.environ.get("AZURE_OPENAI_API_KEY") and os.environ.get("AZURE_OPENAI_ENDPOINT"))
+
+
+def has_any_model_credentials() -> bool:
+    return using_azure_openai() or bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+
+_SYSTEM_PROMPT = (
+    "Answer only from the excerpts given. If they don't contain the answer, "
+    "say so plainly rather than guessing. Cite the page number(s) you used."
+)
+
+
+def _ask_azure_openai(question: str, context: str) -> str:
+    """Same job as _ask_claude, via Azure OpenAI's v1 API instead -- no
+    dated api_version to track (GA since August 2025), just an endpoint,
+    a key, and the deployment name you chose when you deployed a model in
+    Azure AI Foundry (not necessarily the underlying model's own name).
+    """
+    from openai import OpenAI
+
+    deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT")
+    if not deployment:
+        raise RuntimeError(
+            "AZURE_OPENAI_DEPLOYMENT is not set. This is the deployment name you "
+            "chose in Azure AI Foundry when you deployed a model (e.g. 'gpt-4o'), "
+            "not necessarily the model's own name -- check Azure AI Foundry -> "
+            "Deployments for the exact name."
+        )
+
+    endpoint = os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/")
+    client = OpenAI(
+        api_key=os.environ["AZURE_OPENAI_API_KEY"],
+        base_url=f"{endpoint}/openai/v1/",
+    )
+    response = client.chat.completions.create(
+        model=deployment,
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": f"<excerpts>\n{context}\n</excerpts>\n\nQuestion: {question}"},
+        ],
+    )
+    return response.choices[0].message.content
+
+
+def _ask_claude(question: str, context: str) -> str:
     import anthropic
 
-    context = "\n\n---\n\n".join(
-        f"[{c['doc_id']}, pages {c['page_start']}-{c['page_end']}, {c['heading']}]\n{c['text']}"
-        for _, c in matched_chunks
-    )
     client = anthropic.Anthropic()
     response = client.messages.create(
         model=os.environ.get("GOVERNANCE_MODEL", "claude-opus-5"),
         max_tokens=2000,
-        system=(
-            "Answer only from the excerpts given. If they don't contain the answer, "
-            "say so plainly rather than guessing. Cite the page number(s) you used."
-        ),
+        system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": f"<excerpts>\n{context}\n</excerpts>\n\nQuestion: {question}"}],
     )
     return "".join(block.text for block in response.content if block.type == "text")
+
+
+def ask_model(question: str, matched_chunks: list) -> str:
+    """Send the matched chunks + question to whichever model is configured,
+    and return its plain-text answer. Picks Azure OpenAI if those
+    credentials are present, otherwise Claude via the Anthropic API.
+    """
+    context = "\n\n---\n\n".join(
+        f"[{c['doc_id']}, pages {c['page_start']}-{c['page_end']}, {c['heading']}]\n{c['text']}"
+        for _, c in matched_chunks
+    )
+    if using_azure_openai():
+        return _ask_azure_openai(question, context)
+    return _ask_claude(question, context)
 
 
 def main() -> None:
@@ -184,27 +243,30 @@ def main() -> None:
             print(f"  {rank}. {chunk['heading']}  (pages {chunk['page_start']}-{chunk['page_end']}, in {chunk['doc_id']})")
             print(f"     match strength: {score:.2f}  (0 = unrelated, 1 = identical wording)")
 
-        if not os.environ.get("ANTHROPIC_API_KEY"):
+        if not has_any_model_credentials():
             misnamed = [f.name for f in Path(".").glob(".env.*") if f.is_file() and f.name != ".env.example"]
             hint = (
                 f"Found {', '.join(misnamed)} in this folder -- load_dotenv() only "
                 f"reads a file named exactly `.env`, not that. Rename {misnamed[0]} "
                 "to `.env` and try again."
                 if misnamed
-                else "Add it to .env (see README.md 'Setting up your API keys') and "
-                "run this again to get an actual written answer."
+                else "Set either ANTHROPIC_API_KEY, or AZURE_OPENAI_API_KEY + "
+                "AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_DEPLOYMENT, in .env "
+                "(see README.md 'Setting up your API keys') and run this again "
+                "to get an actual written answer."
             )
             print(
                 "\n--------------------------------------------------------------\n"
-                "No answer generated: ANTHROPIC_API_KEY is not set, so Claude was\n"
-                "never asked -- the sections above are only the search step.\n"
+                "No answer generated: no model credentials found, so nothing was\n"
+                "asked -- the sections above are only the search step.\n"
                 f"{hint}\n"
                 "--------------------------------------------------------------"
             )
             return
 
-        print("\nAsking Claude to answer from these sections...\n")
-        answer = ask_claude(args.question, matches)
+        engine = f"Azure OpenAI (deployment: {os.environ.get('AZURE_OPENAI_DEPLOYMENT', '?')})" if using_azure_openai() else "Claude"
+        print(f"\nAsking {engine} to answer from these sections...\n")
+        answer = ask_model(args.question, matches)
         print("=" * 64)
         print("ANSWER")
         print("=" * 64)
