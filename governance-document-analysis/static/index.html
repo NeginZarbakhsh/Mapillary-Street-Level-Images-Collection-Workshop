@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Governance Document Analysis</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --ink: #14181f; --muted: #5b6472; --line: #e2e6ec;
+    --accent: #2f4a7d; --stated: #1f6f43; --inferable: #8a6a00; --undetermined: #7a828f;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  header { background: var(--panel); border-bottom: 1px solid var(--line); padding: 20px 28px; }
+  header h1 { margin: 0; font-size: 19px; letter-spacing: -0.01em; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 28px 64px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin-bottom: 18px; }
+  .drop { border: 2px dashed var(--line); border-radius: 10px; padding: 28px; text-align: center; cursor: pointer; }
+  .drop:hover, .drop.over { border-color: var(--accent); background: #f2f5fb; }
+  .drop strong { display: block; font-size: 16px; margin-bottom: 4px; }
+  .drop span { color: var(--muted); font-size: 13px; }
+  input[type=text] {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px;
+    font-size: 14px; margin-top: 12px;
+  }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 7px;
+    padding: 10px 18px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 12px; }
+  button:disabled { opacity: .5; cursor: default; }
+  .status { margin-top: 14px; color: var(--muted); font-size: 13px; }
+  .error { color: #b3261e; font-weight: 600; }
+  h2 { font-size: 15px; margin: 0 0 14px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  dl { display: grid; grid-template-columns: 170px 1fr; gap: 8px 14px; margin: 0; font-size: 14px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; }
+  .finding { border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+  .tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .tag { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+    padding: 2px 7px; border-radius: 4px; background: #eef1f6; color: var(--muted); }
+  .tag.stated { background: #e6f4ec; color: var(--stated); }
+  .tag.inferable { background: #fbf5e0; color: var(--inferable); }
+  .tag.undetermined { background: #eceef1; color: var(--undetermined); }
+  blockquote { margin: 8px 0; padding: 8px 12px; background: #f7f8fa; border-left: 3px solid var(--line);
+    font-size: 13.5px; font-style: italic; border-radius: 0 5px 5px 0; }
+  .field { margin-top: 6px; font-size: 14px; }
+  .field b { color: var(--muted); font-weight: 600; }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 10px; }
+  .banner { background: #fdf6e3; border: 1px solid #eadcb0; color: #6b5600; padding: 10px 14px;
+    border-radius: 7px; font-size: 13px; margin-bottom: 14px; }
+  .hidden { display: none; }
+  li { margin-bottom: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Governance Document Analysis</h1>
+  <p>Upload bylaws / articles of association. Ask a voting-rights or control question. Every claim is page-cited and verified against the source.</p>
+</header>
+
+<main>
+  <div class="card">
+    <div class="drop" id="drop">
+      <strong>Drop a document here, or click to choose</strong>
+      <span>PDF, DOCX, TXT or MD &middot; up to 20 MB</span>
+      <input type="file" id="file" accept=".pdf,.docx,.txt,.md" hidden>
+    </div>
+    <input type="text" id="question" placeholder="Question (optional) — default: voting rights and max votes per person">
+    <button id="go" disabled>Analyse</button>
+    <div class="status" id="status"></div>
+  </div>
+
+  <div id="results" class="hidden">
+    <div class="card">
+      <h2>Document</h2>
+      <dl id="terms"></dl>
+      <div id="banner" class="banner hidden"></div>
+      <div class="meta" id="usage"></div>
+    </div>
+
+    <div class="card">
+      <h2>Key findings</h2>
+      <div id="findings"></div>
+    </div>
+
+    <div class="card">
+      <h2>Voting rules (<span id="rule-count">0</span>)</h2>
+      <div id="rules"></div>
+    </div>
+
+    <div class="card">
+      <h2>Control summary</h2>
+      <p id="control"></p>
+      <div id="quorum"></div>
+    </div>
+
+    <div class="card" id="open-questions-card">
+      <h2>Open questions</h2>
+      <ul id="open-questions"></ul>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+let selectedFile = null;
+const drop = $("drop"), fileInput = $("file"), go = $("go");
+
+drop.addEventListener("click", () => fileInput.click());
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => {
+  e.preventDefault(); drop.classList.remove("over");
+  if (e.dataTransfer.files.length) selectFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener("change", () => { if (fileInput.files.length) selectFile(fileInput.files[0]); });
+
+function selectFile(file) {
+  selectedFile = file;
+  drop.querySelector("strong").textContent = file.name;
+  go.disabled = false;
+}
+
+go.addEventListener("click", () => { if (selectedFile) analyse(selectedFile); });
+
+async function analyse(file) {
+  $("status").className = "status";
+  $("status").textContent = `Analysing ${file.name}...`;
+  $("results").classList.add("hidden");
+  go.disabled = true;
+
+  const body = new FormData();
+  body.append("file", file);
+  body.append("question", $("question").value);
+
+  try {
+    const res = await fetch("/api/analyse", { method: "POST", body });
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload.detail || `Request failed (${res.status})`);
+    render(payload);
+    $("status").textContent = `Analysed ${file.name}.`;
+  } catch (err) {
+    $("status").className = "status error";
+    $("status").textContent = err.message;
+  } finally {
+    go.disabled = false;
+  }
+}
+
+function findingHtml(label, finding) {
+  const basisClass = finding.basis;
+  return `
+    <div class="finding">
+      <div class="tags">
+        <span class="tag ${esc(basisClass)}">${esc(finding.basis)}</span>
+        ${finding.page ? `<span class="tag">page ${esc(finding.page)}</span>` : ""}
+      </div>
+      <h3 style="margin:0 0 6px;font-size:15px;">${esc(label)}${finding.value ? ': ' + esc(finding.value) : ''}</h3>
+      ${finding.quote ? `<blockquote>${esc(finding.quote)}</blockquote>` : ""}
+      <div class="field">${esc(finding.explanation)}</div>
+    </div>`;
+}
+
+function render(data) {
+  $("results").classList.remove("hidden");
+
+  const rows = [
+    ["Type", data.document_type],
+    ["Entity", data.entity_name],
+    ["Pages", data.page_count],
+    ["Sections detected", data.sections_detected],
+    ["Retrieval mode", data.retrieval_mode === "full_document"
+      ? "Whole document sent to Claude (fits comfortably in context)"
+      : "Retrieval — top matching sections sent to Claude"],
+  ];
+  $("terms").innerHTML = rows.filter(([, v]) => v !== null && v !== undefined)
+    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+
+  if (data.discarded_rules > 0) {
+    $("banner").classList.remove("hidden");
+    $("banner").textContent =
+      `${data.discarded_rules} voting rule(s) were discarded because the quoted text could not ` +
+      `be located in this document. They are not shown.`;
+  } else {
+    $("banner").classList.add("hidden");
+  }
+
+  $("usage").textContent =
+    `${data.input_tokens.toLocaleString()} input tokens · ${data.output_tokens.toLocaleString()} output tokens`;
+
+  $("findings").innerHTML =
+    findingHtml("Votes per ordinary member", data.votes_per_ordinary_member) +
+    findingHtml("Max votes — single natural person", data.max_votes_single_natural_person) +
+    findingHtml("Plural / enhanced voting exists", data.plural_voting_exists);
+
+  $("rule-count").textContent = data.voting_rules.length;
+  $("rules").innerHTML = data.voting_rules.map((r) => `
+    <div class="finding">
+      <div class="tags">
+        <span class="tag">${esc(r.applies_to)}</span>
+        ${r.page ? `<span class="tag">page ${esc(r.page)}</span>` : ""}
+        ${r.votes ? `<span class="tag">${esc(r.votes)} vote(s)</span>` : ""}
+      </div>
+      <div class="field">${esc(r.rule)}</div>
+      ${r.cast_how ? `<div class="field"><b>Cast:</b> ${esc(r.cast_how)}</div>` : ""}
+      <blockquote>${esc(r.quote)}</blockquote>
+    </div>`).join("") || "<p>No voting rules found.</p>";
+
+  $("control").textContent = data.control_summary;
+  $("quorum").innerHTML = data.quorum_and_majority_rules.length
+    ? "<ul>" + data.quorum_and_majority_rules.map((q) => `<li>${esc(q)}</li>`).join("") + "</ul>"
+    : "";
+
+  const oq = $("open-questions");
+  const card = $("open-questions-card");
+  if (data.open_questions.length) {
+    card.classList.remove("hidden");
+    oq.innerHTML = data.open_questions.map((q) => `<li>${esc(q)}</li>`).join("");
+  } else {
+    card.classList.add("hidden");
+  }
+}
+</script>
+</body>
+</html>
