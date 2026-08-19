@@ -168,17 +168,38 @@ def main() -> None:
         build_index(args.chunks_dir, args.out)
 
     elif args.command == "ask":
+        using_real_embeddings = bool(os.environ.get("VOYAGE_API_KEY"))
+        print(f'Question: "{args.question}"\n')
+        print(
+            "Embedding method: Voyage AI (real, meaning-aware)\n"
+            if using_real_embeddings
+            else "Embedding method: local word-overlap fallback (VOYAGE_API_KEY not set)\n"
+            "  -> This ranking is NOT reliable. It matches shared words, not meaning.\n"
+            "     Set VOYAGE_API_KEY for real results -- see README.md Step 7.\n"
+        )
+
         matches = search(args.question, args.index, args.top_k)
-        print(f"Top {len(matches)} matching chunks:\n")
-        for score, chunk in matches:
-            print(f"  {score:.3f}  {chunk['doc_id']}  p{chunk['page_start']}-{chunk['page_end']}  {chunk['heading']!r}")
+        print(f"Closest-matching sections found (best match first):\n")
+        for rank, (score, chunk) in enumerate(matches, start=1):
+            print(f"  {rank}. {chunk['heading']}  (pages {chunk['page_start']}-{chunk['page_end']}, in {chunk['doc_id']})")
+            print(f"     match strength: {score:.2f}  (0 = unrelated, 1 = identical wording)")
 
         if not os.environ.get("ANTHROPIC_API_KEY"):
-            print("\nANTHROPIC_API_KEY not set -- showing retrieved chunks only, not asking Claude.")
+            print(
+                "\n--------------------------------------------------------------\n"
+                "No answer generated: ANTHROPIC_API_KEY is not set, so Claude was\n"
+                "never asked -- the sections above are only the search step.\n"
+                "Add it to .env (see README.md 'Setting up your API keys') and\n"
+                "run this again to get an actual written answer.\n"
+                "--------------------------------------------------------------"
+            )
             return
 
-        print("\nAsking Claude...\n")
+        print("\nAsking Claude to answer from these sections...\n")
         answer = ask_claude(args.question, matches)
+        print("=" * 64)
+        print("ANSWER")
+        print("=" * 64)
         print(answer)
 
 
