@@ -189,6 +189,68 @@ whole collection) is too big to hand over in one piece.
 
 ---
 
+## Step 7: Embedding, search, and asking a question
+
+This is the last stretch — turning your chunks into something searchable,
+then actually asking a question. **None of this needs Azure.** It needs two
+other things instead:
+
+1. **A Voyage AI key**, for turning text into the "meaning as numbers"
+   embeddings — Anthropic's recommended embedding provider. Sign-up steps
+   below.
+2. **The Anthropic key you already have** (`ANTHROPIC_API_KEY`), for the
+   final step where Claude actually reads the matched chunks and answers.
+
+### Setting up Voyage AI (~2 minutes, separate from your Anthropic key)
+
+1. Go to **[dashboard.voyageai.com](https://dashboard.voyageai.com)** and sign up.
+2. Find **API Keys** in the dashboard → create one.
+3. Copy it, then:
+   ```bash
+   export VOYAGE_API_KEY="paste it here"
+   pip install voyageai
+   ```
+
+Cost: **$0.18 per million tokens** — for 18 chunks like your sample, that's a
+fraction of a cent. You will not notice this on your bill.
+
+**Don't have a Voyage key yet, or don't want to sign up right now?** The
+script still runs — it falls back to a crude word-overlap approximation
+instead of real meaning-based embeddings, so you can watch the whole
+mechanism work (build the index, search it, get chunks back) for $0 and no
+signup. Just don't trust its retrieval quality — it's there to prove the
+plumbing, not to answer real questions well.
+
+### Build the index (once per document, or whenever you add new ones)
+
+```bash
+python3 vector_search.py build chunks --out index.json
+```
+
+Reads every `chunks/*.chunks.json` file, embeds each chunk, and saves the
+result — text, page numbers, and each chunk's number-list — into one
+`index.json`.
+
+### Ask a question
+
+```bash
+python3 vector_search.py ask "How many votes does a member have?" --top-k 3
+```
+
+This embeds your question, shows you the closest-matching chunks (so you can
+see *what* it's about to hand to Claude, not just trust it blindly), and —
+if `ANTHROPIC_API_KEY` is set — sends those chunks to Claude and prints the
+answer. If it isn't set, it stops after showing you the matched chunks,
+rather than failing confusingly.
+
+This version keeps things simple — a plain text answer, no page-citation
+verification against the source. The more rigorous version, which checks
+every claim against the actual document text before showing it to you (and
+is what caught the meeting's own "max votes: 3" error), is
+`governance-document-analysis/` in this repo — same ideas, more guardrails.
+
+---
+
 ## What this does and doesn't solve
 
 - **Solves:** getting many PDFs into text, and somewhere off your laptop if
