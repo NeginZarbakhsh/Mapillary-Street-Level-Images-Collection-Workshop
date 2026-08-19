@@ -1,3 +1,4 @@
+.env
 pdfs/*
 !pdfs/.gitkeep
 text_output/*

@@ -34,6 +34,14 @@ import sys
 from pathlib import Path
 from typing import List
 
+# Reads a .env file in the current folder (if one exists) and loads any KEY=value
+# lines into the environment -- so VOYAGE_API_KEY / ANTHROPIC_API_KEY below are
+# found whether they came from `export` or from .env. Does nothing if there's
+# no .env file, so this is always safe to leave in.
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 # ---------------------------------------------------------------------------
 # Step 4: embedding

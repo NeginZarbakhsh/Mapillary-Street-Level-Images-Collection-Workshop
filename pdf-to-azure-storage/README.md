@@ -24,6 +24,35 @@ once you know your storage account will still be there next week.
 
 ---
 
+## Setting up your API keys (do this once)
+
+Every script that needs a key reads it from a `.env` file automatically —
+no `export` command, no retyping it every time you open a new terminal.
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` in any text editor and paste your real keys in after the `=`
+signs. It'll look like:
+
+```
+ANTHROPIC_API_KEY=sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=...
+VOYAGE_API_KEY=
+```
+
+(Leave a line blank if you don't have that key yet — the script for that
+step tells you clearly what's missing rather than failing silently.) Where
+each key comes from is covered in the step it's needed for, below — Step 2
+for the Azure one, Step 7 for Anthropic and Voyage.
+
+**`.env` is already excluded from git** (see `.gitignore`) — it will never
+get uploaded or committed by accident. Still, never paste your `.env`
+contents into a chat, a screenshot, or send the file to anyone.
+
+---
+
 ## Step 1: PDF → text (free, local, no account needed)
 
 ```bash

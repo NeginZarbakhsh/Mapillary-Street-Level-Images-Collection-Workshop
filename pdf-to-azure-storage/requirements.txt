@@ -1,6 +1,7 @@
 pypdf>=5.1.0
 azure-storage-blob>=12.23.0
 anthropic>=0.75.0
+python-dotenv>=1.0.0
 
 # Optional -- only needed if you set VOYAGE_API_KEY for real embeddings.
 # Without it, vector_search.py falls back to a free local approximation.

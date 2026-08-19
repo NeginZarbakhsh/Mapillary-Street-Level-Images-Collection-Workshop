@@ -30,6 +30,14 @@ from azure.storage.blob import (
     generate_blob_sas,
 )
 
+# Reads a .env file in the current folder (if one exists) and loads any KEY=value
+# lines into the environment -- so AZURE_STORAGE_CONNECTION_STRING below is found
+# whether it came from `export` or from .env. Does nothing if there's no .env
+# file, so this is always safe to leave in.
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 def _client() -> BlobServiceClient:
     conn_str = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
