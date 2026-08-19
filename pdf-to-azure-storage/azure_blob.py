@@ -39,15 +39,33 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _misnamed_env_files() -> list:
+    """Find files that look like a mistyped .env (e.g. `.env.legaldocs`) in
+    the current folder. load_dotenv() only reads a file named exactly
+    `.env` -- anything else is invisible to it, which is an easy mistake to
+    make and a confusing one to debug from a "key not set" error alone.
+    """
+    return [f.name for f in Path(".").glob(".env.*") if f.is_file() and f.name != ".env.example"]
+
+
 def _client() -> BlobServiceClient:
     conn_str = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
     if not conn_str:
-        print(
-            "AZURE_STORAGE_CONNECTION_STRING is not set. Get it from the Azure "
-            "portal: your storage account -> Access keys -> key1 -> Connection "
-            "string. See README.md step 3.",
-            file=sys.stderr,
-        )
+        hint = _misnamed_env_files()
+        if hint:
+            print(
+                f"AZURE_STORAGE_CONNECTION_STRING is not set, and {', '.join(hint)} "
+                "is sitting in this folder. load_dotenv() only reads a file named "
+                f"exactly `.env` -- rename {hint[0]} to `.env` and try again.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "AZURE_STORAGE_CONNECTION_STRING is not set. Get it from the Azure "
+                "portal: your storage account -> Access keys -> key1 -> Connection "
+                "string. See README.md step 3.",
+                file=sys.stderr,
+            )
         sys.exit(1)
     return BlobServiceClient.from_connection_string(conn_str)
 

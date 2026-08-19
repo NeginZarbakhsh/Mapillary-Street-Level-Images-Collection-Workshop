@@ -185,12 +185,20 @@ def main() -> None:
             print(f"     match strength: {score:.2f}  (0 = unrelated, 1 = identical wording)")
 
         if not os.environ.get("ANTHROPIC_API_KEY"):
+            misnamed = [f.name for f in Path(".").glob(".env.*") if f.is_file() and f.name != ".env.example"]
+            hint = (
+                f"Found {', '.join(misnamed)} in this folder -- load_dotenv() only "
+                f"reads a file named exactly `.env`, not that. Rename {misnamed[0]} "
+                "to `.env` and try again."
+                if misnamed
+                else "Add it to .env (see README.md 'Setting up your API keys') and "
+                "run this again to get an actual written answer."
+            )
             print(
                 "\n--------------------------------------------------------------\n"
                 "No answer generated: ANTHROPIC_API_KEY is not set, so Claude was\n"
                 "never asked -- the sections above are only the search step.\n"
-                "Add it to .env (see README.md 'Setting up your API keys') and\n"
-                "run this again to get an actual written answer.\n"
+                f"{hint}\n"
                 "--------------------------------------------------------------"
             )
             return
