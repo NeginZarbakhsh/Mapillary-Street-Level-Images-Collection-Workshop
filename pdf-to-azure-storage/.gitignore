@@ -1,0 +1,6 @@
+pdfs/*
+!pdfs/.gitkeep
+text_output/*
+!text_output/.gitkeep
+__pycache__/
+*.pyc
