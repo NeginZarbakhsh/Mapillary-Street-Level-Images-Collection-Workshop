@@ -135,6 +135,60 @@ pulls the bytes straight down.
 
 ---
 
+## Step 6: Chunking — the step after your files are blobs
+
+Now that your text files are up in Blob Storage (or if they never left your
+machine — chunking doesn't care where they came from), the next step is
+splitting each one into pieces small enough to search over. This is `chunk_text.py`.
+
+**If your text files are only in Azure right now**, pull them back down first
+(chunking works on local files, not blobs directly):
+
+```bash
+python3 azure_blob.py download-all --container contracts --out text_output
+```
+
+**Then chunk one file, to see what it does:**
+
+```bash
+python3 chunk_text.py text_output/mydoc.txt
+```
+
+It splits on numbered headings (`§ 12`, `Article 12`, `Clause 12`) so a whole
+clause survives in one piece — tested against the real sample statute: 18
+correct sections, page ranges intact, zero false splits on things like an
+in-text reference to "§ 670 BGB" (a different law being cited, not a real
+heading of the document). If a document has no numbered headings at all, it
+falls back to fixed-size pieces automatically.
+
+**To actually save the chunks** (so the next step — embedding — has
+something to read), add `--out`:
+
+```bash
+python3 chunk_text.py text_output/mydoc.txt --out chunks
+```
+
+**For every file at once:**
+
+```bash
+python3 chunk_text.py text_output --out chunks --batch
+```
+
+Each document gets its own `<name>.chunks.json` in `chunks/` — a list of
+pieces, each with its heading, page range, and text. That JSON is what an
+embedding step would read next (see `governance-document-analysis/app/embeddings.py`
+in this repo for that piece, already built and tested — it's the same
+mechanism, just pointed at a different chunk format).
+
+**One thing worth deciding before you chunk hundreds of documents:** do you
+actually need to? A document that's only a handful of pages doesn't benefit
+from being cut up — see `governance-document-analysis/RESEARCH.md` §0 for why
+whole-document mode is often simpler and safer than chunking for anything
+that fits in one request. Chunking earns its keep once a document (or your
+whole collection) is too big to hand over in one piece.
+
+---
+
 ## What this does and doesn't solve
 
 - **Solves:** getting many PDFs into text, and somewhere off your laptop if

@@ -2,5 +2,6 @@ pdfs/*
 !pdfs/.gitkeep
 text_output/*
 !text_output/.gitkeep
+chunks/
 __pycache__/
 *.pyc

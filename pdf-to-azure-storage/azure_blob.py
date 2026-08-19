@@ -113,6 +113,31 @@ def download(blob_name: str, container: str, out_path: str) -> None:
     print(f"Downloaded {blob_name} -> {out_path} ({len(data):,} bytes)")
 
 
+def download_all(container: str, out_folder: str) -> None:
+    """Pull every blob in a container down into a local folder.
+
+    This is the step before chunking: chunk_text.py reads local .txt files,
+    not blobs directly, so if you uploaded from a different machine (or lost
+    the local copies), this gets them back first.
+    """
+    client = _client()
+    container_client = client.get_container_client(container)
+    out_dir = Path(out_folder)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    names = [b.name for b in container_client.list_blobs()]
+    if not names:
+        print(f"Container '{container}' is empty.")
+        return
+
+    for name in names:
+        data = container_client.download_blob(name).readall()
+        (out_dir / name).write_bytes(data)
+        print(f"  downloaded  {name}")
+
+    print(f"\n{len(names)} file(s) downloaded to {out_dir}/")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -134,6 +159,10 @@ def main() -> None:
     p_download.add_argument("--container", required=True)
     p_download.add_argument("--out", required=True)
 
+    p_download_all = sub.add_parser("download-all", help="Download every file in a container")
+    p_download_all.add_argument("--container", required=True)
+    p_download_all.add_argument("--out", required=True)
+
     args = parser.parse_args()
 
     if args.command == "upload":
@@ -145,6 +174,8 @@ def main() -> None:
         print(link)
     elif args.command == "download":
         download(args.blob_name, args.container, args.out)
+    elif args.command == "download-all":
+        download_all(args.container, args.out)
 
 
 if __name__ == "__main__":
