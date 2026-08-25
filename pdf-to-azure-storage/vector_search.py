@@ -7,20 +7,31 @@ Two commands:
 
     python3 vector_search.py build chunks --out index.json
         Reads every chunks/*.chunks.json file (from chunk_text.py), embeds
-        each chunk's text, and saves everything -- text, page, and its
-        number-list -- into one index.json file. Do this once per document,
-        or whenever you add new documents.
+        each chunk's text, and saves/uploads everything -- text, page, and
+        its number-list. Do this once per document, or whenever you add new
+        documents. --out is ignored when VECTOR_STORE=azure -- see below.
 
     python3 vector_search.py ask "your question" --index index.json
-        Embeds your question, finds the closest-matching chunks in the
-        index, shows them, and (if ANTHROPIC_API_KEY is set) sends them to
-        Claude and prints the answer.
+        Embeds your question, finds the closest-matching chunks, shows them,
+        and (if a model is configured) sends them to it and prints the
+        answer, naming which embedder/store/answer engine actually ran.
 
-Needs a VOYAGE_API_KEY to generate real, meaning-aware embeddings (see
-README.md "Setting up Voyage AI" for how to get one -- it's not Azure, and
-it's not the Anthropic key you already have, it's a third, separate key).
-Without one, this falls back to a crude word-overlap approximation so you can
-still see the mechanism working end-to-end -- just don't trust its answers.
+Three independent choices, each auto-detected from what's in .env -- none of
+them are picked in code:
+
+    Embeddings   -- AZURE_OPENAI_EMBEDDING_DEPLOYMENT (Azure OpenAI), else
+                    VOYAGE_API_KEY (Voyage AI), else a free local word-overlap
+                    approximation (mechanism-only, don't trust its answers).
+    Storage      -- VECTOR_STORE=azure (a real Azure AI Search index; run
+                    `python3 azure_search.py setup` once first) vs. the
+                    default local index.json file. An explicit choice, not
+                    auto-detected, since it swaps the whole storage backend.
+    Answer engine -- AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT (a model
+                    deployed in your Azure account), else ANTHROPIC_API_KEY
+                    (Claude).
+
+See README.md "Setting up your API keys" and Steps 7-8 for where each of
+these six variables comes from.
 """
 
 from __future__ import annotations
