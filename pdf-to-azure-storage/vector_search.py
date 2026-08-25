@@ -47,13 +47,33 @@ load_dotenv()
 # Step 4: embedding
 # ---------------------------------------------------------------------------
 
+def using_azure_search() -> bool:
+    """Explicit opt-in only (VECTOR_STORE=azure), not auto-detected from
+    credentials being present. Unlike the answer-engine choice, this swaps
+    out the entire storage backend -- a local file for a real external
+    index -- so it's deliberately a conscious choice, not a fallback."""
+    return os.environ.get("VECTOR_STORE", "").lower() == "azure"
+
+
 def embed_texts(texts: List[str]) -> List[List[float]]:
     """Turn a list of strings into a list of number-lists (one per string).
 
-    Real embeddings via Voyage AI if VOYAGE_API_KEY is set; otherwise a
-    deterministic word-overlap stand-in so the rest of the pipeline (index,
-    search, ranking) can still be run and checked without any API key.
+    Three paths, in this order:
+    1. Azure OpenAI, if AZURE_OPENAI_EMBEDDING_DEPLOYMENT is set -- keeps the
+       whole pipeline on Azure, avoids Voyage's rate limits entirely.
+    2. Voyage AI, if VOYAGE_API_KEY is set.
+    3. A deterministic word-overlap stand-in otherwise, so the rest of the
+       pipeline (index, search, ranking) can still be run and checked
+       without any API key.
     """
+    if os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT"):
+        from openai import OpenAI
+
+        endpoint = os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/")
+        client = OpenAI(api_key=os.environ["AZURE_OPENAI_API_KEY"], base_url=f"{endpoint}/openai/v1/")
+        response = client.embeddings.create(model=os.environ["AZURE_OPENAI_EMBEDDING_DEPLOYMENT"], input=texts)
+        return [item.embedding for item in response.data]
+
     if os.environ.get("VOYAGE_API_KEY"):
         import voyageai
 
@@ -103,6 +123,12 @@ def build_index(chunks_dir: str, out_path: str) -> None:
     for chunk, vector in zip(all_chunks, vectors):
         chunk["embedding"] = vector
 
+    if using_azure_search():
+        import azure_search
+
+        azure_search.upsert_chunks(all_chunks)
+        return
+
     Path(out_path).write_text(json.dumps(all_chunks, ensure_ascii=False), encoding="utf-8")
     print(f"Saved index with {len(all_chunks)} chunks -> {out_path}")
 
@@ -121,9 +147,14 @@ def _cosine(a: List[float], b: List[float]) -> float:
 
 
 def search(question: str, index_path: str, top_k: int) -> list:
-    chunks = json.loads(Path(index_path).read_text(encoding="utf-8"))
     [q_vector] = embed_texts([question])
 
+    if using_azure_search():
+        import azure_search
+
+        return azure_search.query_vector(q_vector, top_k)
+
+    chunks = json.loads(Path(index_path).read_text(encoding="utf-8"))
     scored = [(_cosine(q_vector, c["embedding"]), c) for c in chunks]
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return scored[:top_k]
@@ -227,14 +258,23 @@ def main() -> None:
         build_index(args.chunks_dir, args.out)
 
     elif args.command == "ask":
-        using_real_embeddings = bool(os.environ.get("VOYAGE_API_KEY"))
         print(f'Question: "{args.question}"\n')
+        if os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT"):
+            embed_line = f"Embedding method: Azure OpenAI (deployment: {os.environ['AZURE_OPENAI_EMBEDDING_DEPLOYMENT']})\n"
+        elif os.environ.get("VOYAGE_API_KEY"):
+            embed_line = "Embedding method: Voyage AI (real, meaning-aware)\n"
+        else:
+            embed_line = (
+                "Embedding method: local word-overlap fallback (no embedding key set)\n"
+                "  -> This ranking is NOT reliable. It matches shared words, not meaning.\n"
+                "     Set VOYAGE_API_KEY or AZURE_OPENAI_EMBEDDING_DEPLOYMENT for real "
+                "results -- see README.md Step 7.\n"
+            )
+        print(embed_line)
         print(
-            "Embedding method: Voyage AI (real, meaning-aware)\n"
-            if using_real_embeddings
-            else "Embedding method: local word-overlap fallback (VOYAGE_API_KEY not set)\n"
-            "  -> This ranking is NOT reliable. It matches shared words, not meaning.\n"
-            "     Set VOYAGE_API_KEY for real results -- see README.md Step 7.\n"
+            f"Storage: Azure AI Search (index: {os.environ.get('AZURE_SEARCH_INDEX', 'governance-chunks')})\n"
+            if using_azure_search()
+            else "Storage: local index.json\n"
         )
 
         matches = search(args.question, args.index, args.top_k)

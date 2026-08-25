@@ -306,6 +306,90 @@ is what caught the meeting's own "max votes: 3" error), is
 
 ---
 
+## Step 8: Switching to Azure AI Search (optional — replaces the local index.json)
+
+Everything up to here uses a plain `index.json` file as the vector store —
+free, and genuinely fine at pilot scale (see `governance-document-analysis/RESEARCH.md`
+for the cost comparison that recommendation is based on). This step swaps
+that file for a real Azure AI Search vector index instead. Do this if:
+
+- Your organisation wants everything to stay inside Azure end to end, or
+- Voyage AI's rate limit is blocking you and adding a payment method there
+  isn't an option (see the note on `VOYAGE_API_KEY` in `.env.example`) — this
+  also removes Voyage from the pipeline entirely, since it switches
+  embeddings to Azure OpenAI at the same time.
+
+**This does cost real money once you have real volume** — Azure AI Search's
+Basic tier runs roughly $75/month as a fixed cost, whether you use it a
+little or a lot (see the Cost Summary in `PDF_to_Search_Pipeline_Guide.docx`
+or `governance-document-analysis/RESEARCH.md` §1). Worth going in with that
+number known rather than discovering it on a bill.
+
+### 1. Deploy an embeddings model in Azure OpenAI
+
+Azure AI Search needs vectors to store — those still come from an embedding
+model, just an Azure one instead of Voyage now. In the same Azure OpenAI
+resource you set up in Step 7 (or a new one):
+
+1. Go to **Deployments** → deploy an embeddings model — **text-embedding-3-small**
+   is the standard, cheap choice.
+2. Note the **deployment name** you gave it (separate from your chat
+   deployment — you'll have two deployments in the same resource, one for
+   answering, one for embedding).
+
+### 2. Create the Azure AI Search resource
+
+1. In the Azure Portal, search **"Azure AI Search"** → **+ Create**.
+2. Pricing tier: **Basic** is the minimum for production use (Free exists but
+   is very limited — fine only for a first look).
+3. Once created, open it → left sidebar → **Keys** → copy the primary
+   admin key.
+
+### 3. Fill in `.env`
+
+```
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-small
+EMBEDDING_DIMENSIONS=1536
+
+VECTOR_STORE=azure
+AZURE_SEARCH_ENDPOINT=https://your-search-resource.search.windows.net
+AZURE_SEARCH_KEY=your-admin-key
+AZURE_SEARCH_INDEX=governance-chunks
+```
+
+`EMBEDDING_DIMENSIONS` must match the deployed model's real output size —
+1536 for `text-embedding-3-small` / `text-embedding-ada-002`, 3072 for
+`text-embedding-3-large`. Get this wrong and the index still gets created,
+but every upload afterward fails with a dimension-mismatch error.
+
+### 4. Create the index (once)
+
+Unlike Blob Storage or Azure OpenAI, Azure AI Search needs a defined schema
+before it can store anything — there's no "just start uploading" step here.
+
+```bash
+pip install azure-search-documents
+python3 azure_search.py setup
+```
+
+Run this again only if you change `EMBEDDING_DIMENSIONS`, or delete the
+index and want it recreated.
+
+### 5. Use it exactly as before
+
+```bash
+python3 vector_search.py build chunks --out index.json
+python3 vector_search.py ask "How many votes does a member have?"
+```
+
+The `--out index.json` argument is ignored when `VECTOR_STORE=azure` (kept
+so the command looks the same either way) — chunks go to Azure AI Search
+instead. The `ask` output now prints a `Storage:` line telling you which one
+actually answered, same as it already tells you which embedding method and
+which answer engine ran.
+
+---
+
 ## What this does and doesn't solve
 
 - **Solves:** getting many PDFs into text, and somewhere off your laptop if

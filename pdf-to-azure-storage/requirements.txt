@@ -5,8 +5,12 @@ python-dotenv>=1.0.0
 # You need at least one of these two -- whichever answer engine you're using.
 # See README.md "Setting up your API keys".
 anthropic>=0.75.0
-# openai>=1.0.0
+# openai>=1.0.0        # also covers Azure OpenAI embeddings, same package
 
 # Optional -- only needed if you set VOYAGE_API_KEY for real embeddings.
 # Without it, vector_search.py falls back to a free local approximation.
 # voyageai>=0.3.0
+
+# Optional -- only needed if VECTOR_STORE=azure (Azure AI Search instead of
+# the local index.json file). See README.md "Setting up Azure AI Search".
+# azure-search-documents>=11.5.2
