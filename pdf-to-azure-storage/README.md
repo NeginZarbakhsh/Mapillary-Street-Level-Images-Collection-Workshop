@@ -1,0 +1,405 @@
+# PDF → text → Azure Blob Storage
+
+Two scripts. Step 1 runs entirely on your machine and costs nothing. Step 2
+uses the cheapest Azure service that exists — not Azure AI Search, not
+Azure OpenAI — because those are the ones that cost real money (see
+`governance-document-analysis/RESEARCH.md` for exactly why). Blob Storage is
+plain file storage, priced at **$0.018 per GB per month** — for a few hundred
+PDFs, that's a few cents a month, not dollars.
+
+## ⚠️ Read this before you upload anything real
+
+You said your Azure access is a **free trial / training sandbox** — the kind
+that expires in a few hours and resets. If that's true of the one you have:
+
+- **Everything you upload will likely be deleted when it expires or resets.**
+- Treat it as a place to *practice the steps*, not a place to *keep your documents*.
+- Your original PDFs are always safe on your own computer regardless — this
+  only affects the *copy* you upload to Azure.
+
+If you need somewhere that actually keeps your files long-term and you don't
+have a persistent Azure subscription, the honest answer is: **your own
+computer, in a folder** is the $0, zero-expiry option. Use Azure for this only
+once you know your storage account will still be there next week.
+
+---
+
+## Setting up your API keys (do this once)
+
+Every script that needs a key reads it from a `.env` file automatically —
+no `export` command, no retyping it every time you open a new terminal.
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` in any text editor and paste your real keys in after the `=`
+signs. It'll look like:
+
+```
+ANTHROPIC_API_KEY=sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=...
+VOYAGE_API_KEY=
+```
+
+(Leave a line blank if you don't have that key yet — the script for that
+step tells you clearly what's missing rather than failing silently.) Where
+each key comes from is covered in the step it's needed for, below — Step 2
+for the Azure one, Step 7 for Anthropic and Voyage.
+
+**`.env` is already excluded from git** (see `.gitignore`) — it will never
+get uploaded or committed by accident. Still, never paste your `.env`
+contents into a chat, a screenshot, or send the file to anyone.
+
+---
+
+## Step 1: PDF → text (free, local, no account needed)
+
+```bash
+pip install -r requirements.txt
+```
+
+Put your PDFs in the `pdfs/` folder, then:
+
+```bash
+python3 pdf_to_text.py
+```
+
+Every PDF in `pdfs/` becomes a `.txt` file in `text_output/`, with page
+markers kept in (`[page 8]`) so you don't lose that information. Already
+tested against your sample document — see the file in `text_output/` right
+now if you want to check the output before running it on the rest.
+
+Scanned (image-only) PDFs get skipped with a message telling you why — this
+script can't OCR them.
+
+---
+
+## Step 2: Get an Azure Blob Storage account (portal, ~5 minutes)
+
+1. Go to **[portal.azure.com](https://portal.azure.com)** and log in with your
+   sandbox credentials.
+2. In the top search bar, type **"Storage accounts"** → click it → **+ Create**.
+3. Fill in the form:
+   - **Resource group** — your sandbox probably already gave you one; pick it
+     from the dropdown rather than creating a new one.
+   - **Storage account name** — has to be globally unique, lowercase, no
+     spaces, e.g. `govdocs2026negin`.
+   - **Region** — whichever is closest to you / already selected.
+   - **Performance** — Standard.
+   - **Redundancy** — **Locally-redundant storage (LRS)**. This is the
+     cheapest option; for a pilot with documents you also have local copies
+     of, you don't need anything fancier.
+4. Click **Review + create**, then **Create**. Wait about a minute.
+5. Once it's done, open the storage account. In the left sidebar, click
+   **Containers** → **+ Container**.
+   - Name it something like `contracts`.
+   - **Public access level: Private (no anonymous access)** — these could be
+     sensitive documents; don't make them public.
+   - Create.
+6. Still in the left sidebar, click **Access keys**. Under **key1**, click
+   **Show**, then copy the **Connection string**. This is your credential —
+   treat it exactly like a password. Don't paste it in chat, don't commit it
+   to GitHub.
+
+## Step 3: Give the script that connection string
+
+```bash
+export AZURE_STORAGE_CONNECTION_STRING="paste the connection string here"
+```
+
+## Step 4: Upload
+
+```bash
+python3 azure_blob.py upload text_output --container contracts
+```
+
+Uploads every file from `text_output/` into the `contracts` container. It
+creates the container automatically if step 2's container name doesn't match
+— but the manual portal steps above let you *see* it exists before trusting
+the script with it.
+
+Check what's actually there:
+
+```bash
+python3 azure_blob.py list --container contracts
+```
+
+---
+
+## Step 5: "Once I upload it, how do I get it from a URL?"
+
+Every blob technically has a URL shaped like:
+
+```
+https://<your-account-name>.blob.core.windows.net/contracts/mydoc.txt
+```
+
+**But since the container is private (which it should be), that URL does
+nothing on its own** — pasting it in a browser gives you an error, not your
+file. Private is the correct default for real documents; you have two ways to
+actually get the content out:
+
+**Option A — a temporary link (use this if you need to share a link, or fetch
+the file with something that isn't this script):**
+
+```bash
+python3 azure_blob.py url mydoc.txt --container contracts --hours 24
+```
+
+This prints a full URL with a signed token stuck on the end (`?sv=...`) —
+that token is what makes it work despite the container being private, and it
+stops working after the number of hours you gave it. Paste that whole link
+(not the plain one from above) into a browser or `curl` and it downloads the
+file. Nobody can reuse it after it expires.
+
+**Option B — just download it directly (simplest, if you're already in Python):**
+
+```bash
+python3 azure_blob.py download mydoc.txt --container contracts --out mydoc.txt
+```
+
+No URL involved at all — this authenticates with your connection string and
+pulls the bytes straight down.
+
+---
+
+## Step 6: Chunking — the step after your files are blobs
+
+Now that your text files are up in Blob Storage (or if they never left your
+machine — chunking doesn't care where they came from), the next step is
+splitting each one into pieces small enough to search over. This is `chunk_text.py`.
+
+**If your text files are only in Azure right now**, pull them back down first
+(chunking works on local files, not blobs directly):
+
+```bash
+python3 azure_blob.py download-all --container contracts --out text_output
+```
+
+**Then chunk one file, to see what it does:**
+
+```bash
+python3 chunk_text.py text_output/mydoc.txt
+```
+
+It splits on numbered headings (`§ 12`, `Article 12`, `Clause 12`) so a whole
+clause survives in one piece — tested against the real sample statute: 18
+correct sections, page ranges intact, zero false splits on things like an
+in-text reference to "§ 670 BGB" (a different law being cited, not a real
+heading of the document). If a document has no numbered headings at all, it
+falls back to fixed-size pieces automatically.
+
+**To actually save the chunks** (so the next step — embedding — has
+something to read), add `--out`:
+
+```bash
+python3 chunk_text.py text_output/mydoc.txt --out chunks
+```
+
+**For every file at once:**
+
+```bash
+python3 chunk_text.py text_output --out chunks --batch
+```
+
+Each document gets its own `<name>.chunks.json` in `chunks/` — a list of
+pieces, each with its heading, page range, and text. That JSON is what an
+embedding step would read next (see `governance-document-analysis/app/embeddings.py`
+in this repo for that piece, already built and tested — it's the same
+mechanism, just pointed at a different chunk format).
+
+**One thing worth deciding before you chunk hundreds of documents:** do you
+actually need to? A document that's only a handful of pages doesn't benefit
+from being cut up — see `governance-document-analysis/RESEARCH.md` §0 for why
+whole-document mode is often simpler and safer than chunking for anything
+that fits in one request. Chunking earns its keep once a document (or your
+whole collection) is too big to hand over in one piece.
+
+---
+
+## Step 7: Embedding, search, and asking a question
+
+This is the last stretch — turning your chunks into something searchable,
+then actually asking a question. It needs two things:
+
+1. **A Voyage AI key**, for turning text into the "meaning as numbers"
+   embeddings — Anthropic's recommended embedding provider. Sign-up steps
+   below.
+2. **An answer engine** — something that actually reads the matched chunks
+   and writes the answer. Two options, pick whichever you have access to:
+   - **Claude, via `ANTHROPIC_API_KEY`** (console.anthropic.com), or
+   - **A model deployed in your own Azure account**, via
+     `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`.
+     `vector_search.py` checks for the Azure variables first and uses that
+     automatically if they're set — you don't need to choose in code,
+     just fill in whichever section of `.env` matches what you have.
+
+### Setting up Azure OpenAI instead of Anthropic (if that's what your sandbox gives you)
+
+1. In the Azure Portal, search **"Azure OpenAI"** (or **"Azure AI Foundry"**)
+   and create a resource — this is the same kind of step as creating the
+   storage account in Step 2, and is subject to the same sandbox-expiry
+   warning at the top of this file.
+2. Inside it, go to **Deployments** and deploy a chat model (e.g. `gpt-4o`).
+   **Note the deployment name you give it** — that's what
+   `AZURE_OPENAI_DEPLOYMENT` needs, not the model's own name.
+3. Back on the resource's overview page, open **Keys and Endpoint** and copy
+   both the key and the endpoint URL into `.env`.
+
+This uses Azure's newer v1 API, which doesn't need a dated `api_version`
+parameter that goes stale over time — one less thing to maintain.
+
+**Using Azure OpenAI means your answers come from a different company's
+model (OpenAI's GPT), not Claude.** Same job, same prompt, different model
+underneath — worth knowing if you're comparing answer quality against
+anything you tested earlier with Claude.
+
+### Setting up Voyage AI (~2 minutes, separate from your Anthropic key)
+
+1. Go to **[dashboard.voyageai.com](https://dashboard.voyageai.com)** and sign up.
+2. Find **API Keys** in the dashboard → create one.
+3. Copy it, then:
+   ```bash
+   export VOYAGE_API_KEY="paste it here"
+   pip install voyageai
+   ```
+
+Cost: **$0.18 per million tokens** — for 18 chunks like your sample, that's a
+fraction of a cent. You will not notice this on your bill.
+
+**Don't have a Voyage key yet, or don't want to sign up right now?** The
+script still runs — it falls back to a crude word-overlap approximation
+instead of real meaning-based embeddings, so you can watch the whole
+mechanism work (build the index, search it, get chunks back) for $0 and no
+signup. Just don't trust its retrieval quality — it's there to prove the
+plumbing, not to answer real questions well.
+
+### Build the index (once per document, or whenever you add new ones)
+
+```bash
+python3 vector_search.py build chunks --out index.json
+```
+
+Reads every `chunks/*.chunks.json` file, embeds each chunk, and saves the
+result — text, page numbers, and each chunk's number-list — into one
+`index.json`.
+
+### Ask a question
+
+```bash
+python3 vector_search.py ask "How many votes does a member have?" --top-k 3
+```
+
+This embeds your question, shows you the closest-matching chunks (so you can
+see *what* it's about to hand to the model, not just trust it blindly), and
+— if either Claude or Azure OpenAI credentials are set — sends those chunks
+over and prints the answer, naming which engine answered. If neither is set,
+it stops after showing you the matched chunks, rather than failing
+confusingly.
+
+This version keeps things simple — a plain text answer, no page-citation
+verification against the source. The more rigorous version, which checks
+every claim against the actual document text before showing it to you (and
+is what caught the meeting's own "max votes: 3" error), is
+`governance-document-analysis/` in this repo — same ideas, more guardrails.
+
+---
+
+## Step 8: Switching to Azure AI Search (optional — replaces the local index.json)
+
+Everything up to here uses a plain `index.json` file as the vector store —
+free, and genuinely fine at pilot scale (see `governance-document-analysis/RESEARCH.md`
+for the cost comparison that recommendation is based on). This step swaps
+that file for a real Azure AI Search vector index instead. Do this if:
+
+- Your organisation wants everything to stay inside Azure end to end, or
+- Voyage AI's rate limit is blocking you and adding a payment method there
+  isn't an option (see the note on `VOYAGE_API_KEY` in `.env.example`) — this
+  also removes Voyage from the pipeline entirely, since it switches
+  embeddings to Azure OpenAI at the same time.
+
+**This does cost real money once you have real volume** — Azure AI Search's
+Basic tier runs roughly $75/month as a fixed cost, whether you use it a
+little or a lot (see the Cost Summary in `PDF_to_Search_Pipeline_Guide.docx`
+or `governance-document-analysis/RESEARCH.md` §1). Worth going in with that
+number known rather than discovering it on a bill.
+
+### 1. Deploy an embeddings model in Azure OpenAI
+
+Azure AI Search needs vectors to store — those still come from an embedding
+model, just an Azure one instead of Voyage now. In the same Azure OpenAI
+resource you set up in Step 7 (or a new one):
+
+1. Go to **Deployments** → deploy an embeddings model — **text-embedding-3-small**
+   is the standard, cheap choice.
+2. Note the **deployment name** you gave it (separate from your chat
+   deployment — you'll have two deployments in the same resource, one for
+   answering, one for embedding).
+
+### 2. Create the Azure AI Search resource
+
+1. In the Azure Portal, search **"Azure AI Search"** → **+ Create**.
+2. Pricing tier: **Basic** is the minimum for production use (Free exists but
+   is very limited — fine only for a first look).
+3. Once created, open it → left sidebar → **Keys** → copy the primary
+   admin key.
+
+### 3. Fill in `.env`
+
+```
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-small
+EMBEDDING_DIMENSIONS=1536
+
+VECTOR_STORE=azure
+AZURE_SEARCH_ENDPOINT=https://your-search-resource.search.windows.net
+AZURE_SEARCH_KEY=your-admin-key
+AZURE_SEARCH_INDEX=governance-chunks
+```
+
+`EMBEDDING_DIMENSIONS` must match the deployed model's real output size —
+1536 for `text-embedding-3-small` / `text-embedding-ada-002`, 3072 for
+`text-embedding-3-large`. Get this wrong and the index still gets created,
+but every upload afterward fails with a dimension-mismatch error.
+
+### 4. Create the index (once)
+
+Unlike Blob Storage or Azure OpenAI, Azure AI Search needs a defined schema
+before it can store anything — there's no "just start uploading" step here.
+
+```bash
+pip install azure-search-documents
+python3 azure_search.py setup
+```
+
+Run this again only if you change `EMBEDDING_DIMENSIONS`, or delete the
+index and want it recreated.
+
+### 5. Use it exactly as before
+
+```bash
+python3 vector_search.py build chunks --out index.json
+python3 vector_search.py ask "How many votes does a member have?"
+```
+
+The `--out index.json` argument is ignored when `VECTOR_STORE=azure` (kept
+so the command looks the same either way) — chunks go to Azure AI Search
+instead. The `ask` output now prints a `Storage:` line telling you which one
+actually answered, same as it already tells you which embedding method and
+which answer engine ran.
+
+---
+
+## What this does and doesn't solve
+
+- **Solves:** getting many PDFs into text, and somewhere off your laptop if
+  you need that, for close to $0.
+- **Doesn't solve:** actually *analysing* the documents (voting rights,
+  control, etc.) — that's `governance-document-analysis/` in this repo, and
+  it still needs an Anthropic API key regardless of where the source files
+  live.
+- **Doesn't solve:** search across many documents at once — Blob Storage
+  just stores files, it doesn't index or embed them. If you get to the point
+  of needing to search across hundreds of documents, that's when the
+  RAG pipeline in `governance-document-analysis/` (or Azure AI Search /
+  MongoDB Atlas, per `RESEARCH.md`) becomes relevant — not before.

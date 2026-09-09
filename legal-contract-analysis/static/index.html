@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Contract Review</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --ink: #14181f;
+    --muted: #5b6472;
+    --line: #e2e6ec;
+    --accent: #2f4a7d;
+    --critical: #b3261e;
+    --high: #c2610a;
+    --medium: #8a6a00;
+    --low: #4a5568;
+    --ok: #1f6f43;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    padding: 20px 28px;
+  }
+  header h1 { margin: 0; font-size: 19px; letter-spacing: -0.01em; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  main { max-width: 1180px; margin: 0 auto; padding: 24px 28px 64px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 20px; margin-bottom: 18px;
+  }
+  .drop {
+    border: 2px dashed var(--line); border-radius: 10px; padding: 34px;
+    text-align: center; cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); background: #f2f5fb; }
+  .drop strong { display: block; font-size: 16px; margin-bottom: 4px; }
+  .drop span { color: var(--muted); font-size: 13px; }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 7px;
+    padding: 10px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .status { margin-top: 14px; color: var(--muted); font-size: 13px; }
+  .error { color: var(--critical); font-weight: 600; }
+  .grid { display: grid; grid-template-columns: 1.15fr .85fr; gap: 18px; align-items: start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  h2 { font-size: 15px; margin: 0 0 14px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  h3 { font-size: 15px; margin: 0 0 6px; }
+  dl { display: grid; grid-template-columns: 150px 1fr; gap: 7px 14px; margin: 0; font-size: 14px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; }
+  .finding {
+    border: 1px solid var(--line); border-left: 4px solid var(--low);
+    border-radius: 8px; padding: 14px; margin-bottom: 12px;
+  }
+  .finding.critical { border-left-color: var(--critical); }
+  .finding.high { border-left-color: var(--high); }
+  .finding.medium { border-left-color: var(--medium); }
+  .tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .tag {
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+    padding: 2px 7px; border-radius: 4px; background: #eef1f6; color: var(--muted);
+  }
+  .tag.sev-critical { background: #fdecea; color: var(--critical); }
+  .tag.sev-high { background: #fdf0e3; color: var(--high); }
+  .tag.sev-medium { background: #fbf5e0; color: var(--medium); }
+  .tag.rule { background: #e8eefb; color: var(--accent); }
+  blockquote {
+    margin: 10px 0; padding: 9px 12px; background: #f7f8fa;
+    border-left: 3px solid var(--line); font-size: 13.5px; font-style: italic;
+    cursor: pointer; border-radius: 0 5px 5px 0;
+  }
+  blockquote:hover { background: #eef2f8; }
+  .field { margin-top: 8px; font-size: 14px; }
+  .field b { color: var(--muted); font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .doc {
+    max-height: 640px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word;
+    font: 12.5px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: #fbfcfd; border: 1px solid var(--line); border-radius: 7px; padding: 14px;
+  }
+  mark { background: #ffe9a8; padding: 1px 0; }
+  mark.active { background: #ffc94d; outline: 2px solid #e0a800; }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 10px; }
+  .banner {
+    background: #fdf6e3; border: 1px solid #eadcb0; color: #6b5600;
+    padding: 10px 14px; border-radius: 7px; font-size: 13px; margin-bottom: 14px;
+  }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Contract Review</h1>
+  <p>Upload a contract. Every finding is anchored to verbatim text in the document.</p>
+</header>
+
+<main>
+  <div class="card" id="upload-card">
+    <div class="drop" id="drop">
+      <strong>Drop a contract here, or click to choose</strong>
+      <span>PDF, DOCX, TXT or MD &middot; up to 20 MB</span>
+      <input type="file" id="file" accept=".pdf,.docx,.txt,.md" hidden>
+    </div>
+    <div class="status" id="status"></div>
+  </div>
+
+  <div id="results" class="hidden">
+    <div class="card">
+      <h2>Assessment</h2>
+      <p id="assessment" style="margin:0 0 14px;font-size:15px;"></p>
+      <div id="dropped" class="banner hidden"></div>
+      <dl id="terms"></dl>
+      <div class="meta" id="usage"></div>
+    </div>
+
+    <div class="grid">
+      <div>
+        <div class="card">
+          <h2>Risk findings (<span id="finding-count">0</span>)</h2>
+          <div id="findings"></div>
+        </div>
+        <div class="card">
+          <h2>Missing protections</h2>
+          <div id="missing"></div>
+        </div>
+        <div class="card">
+          <h2>Obligations</h2>
+          <table>
+            <thead><tr><th>Party</th><th>Obligation</th><th>When</th><th>Ref</th></tr></thead>
+            <tbody id="obligations"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Source document</h2>
+        <p class="meta" style="margin-top:-6px">Click any quote on the left to jump to it here.</p>
+        <div class="doc" id="doc"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const drop = $("drop"), fileInput = $("file");
+
+drop.addEventListener("click", () => fileInput.click());
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => {
+  e.preventDefault();
+  drop.classList.remove("over");
+  if (e.dataTransfer.files.length) upload(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener("change", () => {
+  if (fileInput.files.length) upload(fileInput.files[0]);
+});
+
+async function upload(file) {
+  $("status").className = "status";
+  $("status").textContent = `Reviewing ${file.name}. A long contract can take a couple of minutes.`;
+  $("results").classList.add("hidden");
+
+  const body = new FormData();
+  body.append("file", file);
+
+  try {
+    const res = await fetch("/api/analyse", { method: "POST", body });
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload.detail || `Request failed (${res.status})`);
+    render(payload);
+    $("status").textContent = `Reviewed ${file.name}.`;
+  } catch (err) {
+    $("status").className = "status error";
+    $("status").textContent = err.message;
+  }
+}
+
+// Build the document pane with every anchored quote wrapped in a <mark>.
+// Ranges are applied back-to-front so earlier offsets stay valid.
+function renderDocument(text, anchors) {
+  const sorted = anchors
+    .filter((a) => a.anchor)
+    .map((a, i) => ({ ...a.anchor, key: a.key }))
+    .sort((a, b) => a.start - b.start);
+
+  // Drop overlaps: two findings can cite the same sentence.
+  const clean = [];
+  let lastEnd = -1;
+  for (const range of sorted) {
+    if (range.start >= lastEnd) { clean.push(range); lastEnd = range.end; }
+  }
+
+  let html = "";
+  let cursor = 0;
+  for (const range of clean) {
+    html += esc(text.slice(cursor, range.start));
+    html += `<mark id="anchor-${range.key}">${esc(text.slice(range.start, range.end))}</mark>`;
+    cursor = range.end;
+  }
+  html += esc(text.slice(cursor));
+  $("doc").innerHTML = html;
+}
+
+function jumpTo(key) {
+  const el = document.getElementById(`anchor-${key}`);
+  if (!el) return;
+  document.querySelectorAll("mark.active").forEach((m) => m.classList.remove("active"));
+  el.classList.add("active");
+  el.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+function render(data) {
+  $("results").classList.remove("hidden");
+  $("assessment").textContent = data.overall_assessment;
+
+  if (data.discarded_findings > 0) {
+    $("dropped").classList.remove("hidden");
+    $("dropped").textContent =
+      `${data.discarded_findings} finding(s) were discarded because the quoted text ` +
+      `could not be located in this document. They are not shown.`;
+  } else {
+    $("dropped").classList.add("hidden");
+  }
+
+  const t = data.key_terms;
+  const rows = [
+    ["Type", t.contract_type],
+    ["Parties", t.parties.map((p) => `${p.name} (${p.role})`).join("<br>")],
+    ["Effective date", t.effective_date],
+    ["Initial term", t.initial_term],
+    ["Renewal", t.renewal],
+    ["Governing law", [t.governing_law, t.jurisdiction].filter(Boolean).join(" / ")],
+    ["Value", t.total_value],
+    ["Payment terms", t.payment_terms],
+    ["Summary", t.plain_english_summary],
+  ];
+  $("terms").innerHTML = rows
+    .filter(([, v]) => v)
+    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${k === "Parties" ? v : esc(v)}</dd>`)
+    .join("");
+
+  $("usage").textContent =
+    `${data.character_count.toLocaleString()} characters · ` +
+    `${data.input_tokens.toLocaleString()} input tokens · ` +
+    `${data.output_tokens.toLocaleString()} output tokens`;
+
+  const anchors = [];
+  data.findings.forEach((f, i) => anchors.push({ key: `f${i}`, anchor: f.anchor }));
+  data.obligations.forEach((o, i) => anchors.push({ key: `o${i}`, anchor: o.anchor }));
+  renderDocument(data.source_text, anchors);
+
+  $("finding-count").textContent = data.findings.length;
+  $("findings").innerHTML = data.findings.map((f, i) => `
+    <div class="finding ${esc(f.severity)}">
+      <div class="tags">
+        <span class="tag sev-${esc(f.severity)}">${esc(f.severity)}</span>
+        <span class="tag">${esc(f.category.replace(/_/g, " "))}</span>
+        ${f.clause_reference ? `<span class="tag">clause ${esc(f.clause_reference)}</span>` : ""}
+        ${f.playbook_rule ? `<span class="tag rule">${esc(f.playbook_rule)}</span>` : ""}
+      </div>
+      <h3>${esc(f.title)}</h3>
+      <blockquote data-key="f${i}">${esc(f.quote)}</blockquote>
+      <div class="field"><b>What it means.</b> ${esc(f.what_it_means)}</div>
+      <div class="field"><b>Why it matters.</b> ${esc(f.why_it_matters)}</div>
+      <div class="field"><b>Ask for.</b> ${esc(f.recommendation)}</div>
+    </div>`).join("") || "<p>No findings.</p>";
+
+  $("missing").innerHTML = data.missing_protections.map((m) => `
+    <div class="finding low">
+      <h3>${esc(m.clause_type)}</h3>
+      <div class="field"><b>Why it matters.</b> ${esc(m.why_it_matters)}</div>
+      <div class="field"><b>Position to take.</b> ${esc(m.suggested_position)}</div>
+    </div>`).join("") || "<p>Nothing flagged as missing.</p>";
+
+  $("obligations").innerHTML = data.obligations.map((o, i) => `
+    <tr>
+      <td>${esc(o.responsible_party)}</td>
+      <td><span class="link" data-key="o${i}" style="cursor:pointer;border-bottom:1px dotted #999">${esc(o.obligation)}</span></td>
+      <td>${esc(o.trigger_or_deadline || "—")}</td>
+      <td>${esc(o.clause_reference || "—")}</td>
+    </tr>`).join("");
+
+  document.querySelectorAll("[data-key]").forEach((el) =>
+    el.addEventListener("click", () => jumpTo(el.dataset.key)));
+}
+</script>
+</body>
+</html>

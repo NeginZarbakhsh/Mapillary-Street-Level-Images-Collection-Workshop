@@ -1,0 +1,9 @@
+.env
+pdfs/*
+!pdfs/.gitkeep
+text_output/*
+!text_output/.gitkeep
+chunks/
+index.json
+__pycache__/
+*.pyc
