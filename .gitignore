@@ -1,0 +1,8 @@
+# Secrets -- never commit API keys
+.env
+
+# KYB tool output and cached sanctions list
+kyb_output/
+uk_sanctions_list.xml
+__pycache__/
+*.pyc

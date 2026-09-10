@@ -1,0 +1,6 @@
+# Companies House KYC/KYB tool
+requests>=2.31.0
+
+# Optional: nicer .xlsx output (bold headers, frozen panes, auto column widths).
+# Without it, xlsx export still works via a built-in standard-library writer.
+openpyxl>=3.1.0
