@@ -11,13 +11,43 @@ pip install -r requirements-kyc.txt
 
 # Create a REST API key at https://developer.company-information.service.gov.uk
 cp .env.example .env        # then paste your key into .env
-# or:
+# or (macOS/Linux/bash):
 export COMPANIES_HOUSE_API_KEY=your-key
 ```
+
+**Windows PowerShell:** `export` is bash syntax and does not work in PowerShell — it
+either errors or silently sets nothing, which shows up later as a confusing `401
+Unauthorized` even though the key looks right. Use one of these instead:
+
+```powershell
+# Session env var (PowerShell syntax)
+$env:COMPANIES_HOUSE_API_KEY = "your-key"
+
+# .env file — works in any shell, but must sit in the folder you run the script from
+"COMPANIES_HOUSE_API_KEY=your-key" | Out-File -Encoding utf8 .env
+
+# Or skip env entirely
+python companies_house_kyc.py 00102498 --api-key your-key
+```
+
+A `.env` file is only found in the **current working directory** — if you `cd` to a
+different folder before running the script, either copy `.env` there too or use
+`$env:` / `--api-key`, which aren't tied to a folder.
 
 `.env` is gitignored. **Never commit a key, paste one into a chat, or screenshot it** —
 a key that has been shared is compromised and should be deleted and regenerated in the
 Companies House developer hub.
+
+### Getting a 401 Unauthorized?
+
+1. Confirm it's a **new** key, not one that was ever pasted into a chat, screenshot,
+   or committed — Companies House can't tell you it revoked a leaked key, it just
+   starts rejecting it.
+2. On Windows, confirm you used `$env:COMPANIES_HOUSE_API_KEY` (PowerShell), not
+   `export` (bash) — see above.
+3. Check the key type is **REST API key**, not a streaming key (different auth).
+4. Check for a stray trailing space or newline if it was pasted from somewhere —
+   `--api-key your-key` on the command line sidesteps this entirely for testing.
 
 ## Usage
 
