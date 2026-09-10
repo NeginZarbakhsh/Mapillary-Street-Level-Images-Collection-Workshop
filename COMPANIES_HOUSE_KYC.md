@@ -95,3 +95,61 @@ sanctions only: no EU, OFAC/US, or UN lists, and no PEP or adverse-media screeni
 - Officer and PSC lists are paginated automatically, so companies with many directors are complete.
 - Dates of birth are month/year only — that is all Companies House publishes.
 - Companies with no PSC register return an empty `beneficial_owners` list rather than failing.
+
+## Getting many companies, not one
+
+There is **no endpoint that lists every UK company**. Run `python companies_house_kyc.py --bulk-info`
+for the summary, or read on.
+
+### 1. Filtered bulk listing (`--advanced-search`)
+
+The closest the API gets: every company matching a filter. At least one filter is required.
+
+```bash
+# All active software companies (SIC 62012) -- directory only, one row each
+python companies_house_kyc.py --advanced-search --sic 62012 --status active --format csv
+
+# Everything registered in Manchester, first 500
+python companies_house_kyc.py --advanced-search --location manchester --limit 500
+
+# Incorporated in 2025, name contains "capital"
+python companies_house_kyc.py --advanced-search --name-includes capital \
+    --incorporated-from 2025-01-01 --incorporated-to 2025-12-31
+
+# Add --full to also pull officers, PSC and sanctions screening for every hit (slow)
+python companies_house_kyc.py --advanced-search --sic 64191 --status active --limit 100 --full
+```
+
+Filters: `--sic`, `--status`, `--type`, `--location`, `--name-includes`, `--name-excludes`,
+`--incorporated-from/-to`, `--dissolved-from/-to`, `--limit`. The repeatable ones
+(`--sic`, `--status`, `--type`) can be given more than once.
+
+Without `--full` you get a directory (one row per company, one request per 100 companies).
+With `--full` each company costs ~4 requests, so the tool paces itself and prints an estimate.
+
+Companies House caps how deep pagination can go, so a very broad filter returns the first
+few thousand rather than the true total — the run prints the real `hits` count. Split large
+sets by SIC code or by year to work through them.
+
+### 2. The complete register — bulk snapshot
+
+For genuinely *all* companies, download the free **Company Data Product**: a monthly CSV
+snapshot of every live company (several million rows, ~400 MB zipped, no key needed) from
+<http://download.companieshouse.gov.uk/en_output.html>. It carries number, name, address,
+status, SIC codes and accounts dates, but **not** officers or PSC detail — those are separate
+data products on the same site.
+
+Then enrich the ones you care about:
+
+```bash
+# clients.csv just needs company numbers in the first column
+python companies_house_kyc.py --numbers-file clients.csv --format xlsx
+```
+
+`--numbers-file` skips a header row, comments (`#`) and blank lines, and a company number that
+fails is logged and skipped rather than losing the whole batch.
+
+### 3. Streaming API
+
+For keeping a loaded snapshot in sync in real time. Needs a separate streaming key — not
+covered by this tool.

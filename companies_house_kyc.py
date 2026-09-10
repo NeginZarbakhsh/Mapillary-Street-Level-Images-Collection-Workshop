@@ -58,6 +58,11 @@ UKSL_XML_URL = "https://sanctionslist.fcdo.gov.uk/docs/UK-Sanctions-List.xml"
 
 SUPPORTED_FORMATS = ("json", "csv", "xlsx", "md", "txt")
 
+# Companies House allows 600 requests per 5 minutes (2/sec sustained). Bulk runs
+# set this so we pace ourselves instead of relying on 429 retries.
+MIN_REQUEST_INTERVAL = 0.0
+_last_request_at = 0.0
+
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -126,10 +131,16 @@ def _get(session, url: str, params: Optional[dict] = None, *, retries: int = 4) 
     Companies House allows 600 requests per 5 minutes and answers 429 when you
     exceed it -- the original code let that surface as a bare HTTPError.
     """
+    global _last_request_at
     delay = 2.0
     last_error = ""
 
     for attempt in range(retries + 1):
+        if MIN_REQUEST_INTERVAL:
+            wait = MIN_REQUEST_INTERVAL - (time.monotonic() - _last_request_at)
+            if wait > 0:
+                time.sleep(wait)
+        _last_request_at = time.monotonic()
         try:
             resp = session.get(url, params=params, timeout=30)
         except requests.exceptions.RequestException as exc:
@@ -214,6 +225,168 @@ def normalise_company_number(number: str) -> str:
 def search_company(session, query: str, items: int = 5) -> dict:
     """Search by name, for when you have a company name but not a number."""
     return _get(session, f"{BASE_URL}/search/companies", {"q": query, "items_per_page": items})
+
+
+SEARCH_FIELDS = [
+    "company_number", "company_name", "company_status", "company_type",
+    "date_of_creation", "date_of_cessation", "sic_codes", "registered_address",
+]
+
+
+def advanced_search(
+    session,
+    *,
+    name_includes: Optional[str] = None,
+    name_excludes: Optional[str] = None,
+    sic_codes: Optional[list] = None,
+    company_status: Optional[list] = None,
+    company_type: Optional[list] = None,
+    location: Optional[str] = None,
+    incorporated_from: Optional[str] = None,
+    incorporated_to: Optional[str] = None,
+    dissolved_from: Optional[str] = None,
+    dissolved_to: Optional[str] = None,
+    limit: int = 1000,
+    page_size: int = 100,
+) -> list:
+    """Filtered bulk listing via /advanced-search/companies.
+
+    There is no "list every company" endpoint -- this is the closest the API
+    gets: every company matching a filter (SIC code, location, status, type,
+    incorporation or dissolution date range, name fragment), paginated.
+
+    Companies House caps how deep pagination can go, so very broad filters
+    return the first N thousand rather than the true total. `hits` in the
+    response tells you the real total; narrow the filter (e.g. one SIC code
+    at a time, or year-by-year date ranges) to work through a large set.
+    For a genuinely complete national list, use the free bulk snapshot
+    instead -- see bulk_snapshot_info().
+    """
+    params: dict = {}
+    if name_includes:
+        params["company_name_includes"] = name_includes
+    if name_excludes:
+        params["company_name_excludes"] = name_excludes
+    if sic_codes:
+        params["sic_codes"] = list(sic_codes)
+    if company_status:
+        params["company_status"] = list(company_status)
+    if company_type:
+        params["company_type"] = list(company_type)
+    if location:
+        params["location"] = location
+    if incorporated_from:
+        params["incorporated_from"] = incorporated_from
+    if incorporated_to:
+        params["incorporated_to"] = incorporated_to
+    if dissolved_from:
+        params["dissolved_from"] = dissolved_from
+    if dissolved_to:
+        params["dissolved_to"] = dissolved_to
+
+    if not params:
+        raise KYBError(
+            "Advanced search needs at least one filter -- the API will not return\n"
+            "  every company on the register. Try --sic 62012, --location london,\n"
+            "  --status active, --incorporated-from 2024-01-01, or --name-includes bank.\n"
+            "  For the complete register, download the bulk snapshot (see --bulk-info)."
+        )
+
+    items: list = []
+    start = 0
+    total: Optional[int] = None
+
+    while len(items) < limit:
+        page_params = dict(params, start_index=start, size=min(page_size, limit - len(items)))
+        try:
+            payload = _get(session, f"{BASE_URL}/advanced-search/companies", page_params)
+        except KYBError as exc:
+            if items and ("416" in str(exc) or "400" in str(exc)):
+                # Pagination depth cap reached -- keep what we have.
+                print(f"  ! Stopped at {len(items)} results (pagination limit).", file=sys.stderr)
+                break
+            raise
+        page = payload.get("items") or []
+        if total is None:
+            total = payload.get("hits")
+            if total is not None:
+                print(f"  {total} companies match; retrieving up to {limit}.", file=sys.stderr)
+        items.extend(page)
+        if not page or len(page) < page_params["size"] or (total is not None and len(items) >= total):
+            break
+        start += len(page)
+
+    return items[:limit]
+
+
+def search_row(item: dict) -> dict:
+    """Flatten one advanced-search hit into a table row."""
+    return {
+        "company_number": item.get("company_number"),
+        "company_name": item.get("company_name") or item.get("title"),
+        "company_status": item.get("company_status"),
+        "company_type": item.get("company_type") or item.get("type"),
+        "date_of_creation": item.get("date_of_creation"),
+        "date_of_cessation": item.get("date_of_cessation"),
+        "sic_codes": ", ".join(item.get("sic_codes") or []),
+        "registered_address": _format_address(item.get("registered_office_address"))
+        or item.get("address_snippet", ""),
+    }
+
+
+def read_numbers_file(path: str) -> list:
+    """Read company numbers from a text or CSV file (first column, one per line).
+
+    Lets you run a list you already have -- e.g. rows exported from the bulk
+    snapshot, or a client list from your own system.
+    """
+    file = Path(path)
+    if not file.is_file():
+        raise KYBError(f"Company number file not found: {path}")
+
+    numbers = []
+    for line in file.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        first = line.split(",")[0].strip().strip('"').strip("'")
+        if first.lower() in {"company_number", "companynumber", "number"}:
+            continue  # header row
+        if first:
+            numbers.append(first)
+    if not numbers:
+        raise KYBError(f"No company numbers found in {path}")
+    return numbers
+
+
+def bulk_snapshot_info() -> str:
+    """How to get the genuinely complete register, which no API endpoint provides."""
+    return (
+        "Getting EVERY UK company\n"
+        "------------------------\n"
+        "The REST API has no 'list all companies' endpoint. Three ways to go wide:\n"
+        "\n"
+        "1. Filtered bulk listing (this tool, no extra downloads):\n"
+        "     python companies_house_kyc.py --advanced-search --sic 62012 --status active\n"
+        "     python companies_house_kyc.py --advanced-search --location manchester --limit 2000\n"
+        "   Pagination is capped, so split very large sets by SIC code or by year\n"
+        "   (--incorporated-from / --incorporated-to).\n"
+        "\n"
+        "2. Free Company Data Product -- a monthly CSV snapshot of every live company\n"
+        "   (several million rows, ~400 MB zipped, no API key needed):\n"
+        "     http://download.companieshouse.gov.uk/en_output.html\n"
+        "   Includes number, name, address, status, SIC codes and accounts dates.\n"
+        "   It does NOT include officers or PSC detail -- those are separate\n"
+        "   snapshots, and the full PSC data product is on the same download site.\n"
+        "   Feed its company_number column back in with --numbers-file to enrich.\n"
+        "\n"
+        "3. Streaming API -- a real-time firehose of changes, for keeping a copy\n"
+        "   in sync once you have loaded a snapshot. Needs a separate streaming key.\n"
+        "\n"
+        "Rate limit: 600 requests per 5 minutes. A full KYB check is ~4 requests, so\n"
+        "roughly 150 companies per 5 minutes. This tool paces itself automatically\n"
+        "for bulk runs; a few thousand companies will take hours, not minutes.\n"
+    )
 
 
 def get_company_profile(session, company_number: str) -> dict:
@@ -821,6 +994,77 @@ def export(results: list, formats: Iterable[str], outdir: str = "kyb_output", st
     return written
 
 
+def export_search(items: list, formats: Iterable[str], outdir: str = "kyb_output", stem: Optional[str] = None) -> list:
+    """Write an advanced-search result set (a flat company list) to disk.
+
+    Same formats as export(), but one table rather than the full KYB structure --
+    this is a directory of companies, not a per-company dossier.
+    """
+    out = Path(outdir)
+    out.mkdir(parents=True, exist_ok=True)
+    stem = stem or f"companies_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    rows = [search_row(item) for item in items]
+    written: list = []
+
+    for fmt in formats:
+        fmt = fmt.strip().lower()
+        if fmt == "json":
+            path = out / f"{stem}.json"
+            path.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
+        elif fmt == "csv":
+            path = out / f"{stem}.csv"
+            with path.open("w", newline="", encoding="utf-8-sig") as fh:
+                writer = csv.DictWriter(fh, fieldnames=SEARCH_FIELDS, extrasaction="ignore")
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({f: _stringify(row.get(f)) for f in SEARCH_FIELDS})
+        elif fmt == "xlsx":
+            path = out / f"{stem}.xlsx"
+            _write_search_xlsx(path, rows)
+        elif fmt == "md":
+            path = out / f"{stem}.md"
+            table = _markdown_table(
+                [f.replace("_", " ").title() for f in SEARCH_FIELDS],
+                [[row.get(f) for f in SEARCH_FIELDS] for row in rows],
+            )
+            path.write_text(f"# Companies ({len(rows)})\n\n{table}", encoding="utf-8")
+        elif fmt == "txt":
+            path = out / f"{stem}.txt"
+            lines = [f"{len(rows)} companies", "=" * 70]
+            for row in rows:
+                lines.append(f"{_stringify(row['company_number']):<10} {_stringify(row['company_name'])}")
+                lines.append(f"{'':<10} {_stringify(row['company_status'])} | inc. {_stringify(row['date_of_creation'])} | {_stringify(row['registered_address'])}")
+            path.write_text("\n".join(lines), encoding="utf-8")
+        else:
+            raise KYBError(f"Unknown format '{fmt}'. Choose from: {', '.join(SUPPORTED_FORMATS)}, all")
+        written.append(path)
+    return written
+
+
+def _write_search_xlsx(path: Path, rows: list) -> None:
+    sheet = [("Companies", SEARCH_FIELDS, [[row.get(f) for f in SEARCH_FIELDS] for row in rows])]
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+    except ImportError:
+        _write_xlsx_stdlib(path, sheet)
+        return
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Companies"
+    ws.append(SEARCH_FIELDS)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for row in rows:
+        ws.append([_stringify(row.get(f)) for f in SEARCH_FIELDS])
+    ws.freeze_panes = "A2"
+    for idx, column in enumerate(SEARCH_FIELDS, start=1):
+        longest = max([len(column)] + [len(_stringify(r.get(column))) for r in rows] or [0])
+        ws.column_dimensions[ws.cell(row=1, column=idx).column_letter].width = min(max(longest + 2, 12), 60)
+    wb.save(path)
+
+
 def parse_formats(value: str) -> list:
     if value.strip().lower() == "all":
         return list(SUPPORTED_FORMATS)
@@ -844,10 +1088,35 @@ def build_parser() -> argparse.ArgumentParser:
             "  python companies_house_kyc.py 00102498 09659799 --format json,csv,xlsx\n"
             "  python companies_house_kyc.py --search 'monzo bank'\n"
             "  python companies_house_kyc.py 00102498 --format all --outdir reports\n"
+            "  python companies_house_kyc.py --advanced-search --sic 62012 --status active --format csv\n"
+            "  python companies_house_kyc.py --advanced-search --location london --limit 500 --full\n"
+            "  python companies_house_kyc.py --numbers-file clients.csv --format xlsx\n"
+            "  python companies_house_kyc.py --bulk-info\n"
         ),
     )
     parser.add_argument("company_numbers", nargs="*", help="One or more company numbers, e.g. 00102498")
     parser.add_argument("--search", metavar="NAME", help="Search by company name instead of number")
+    parser.add_argument("--numbers-file", metavar="PATH", help="Read company numbers from a text/CSV file (one per line)")
+    parser.add_argument("--bulk-info", action="store_true", help="Explain how to get every UK company, and exit")
+
+    bulk = parser.add_argument_group(
+        "bulk listing (advanced search)",
+        "Return every company matching a filter, rather than one you name. "
+        "At least one filter is required -- there is no 'list all companies' endpoint.",
+    )
+    bulk.add_argument("--advanced-search", action="store_true", help="List companies matching the filters below")
+    bulk.add_argument("--sic", action="append", metavar="CODE", help="SIC code, repeatable (e.g. --sic 62012)")
+    bulk.add_argument("--status", action="append", metavar="STATUS", help="active, dissolved, liquidation ... repeatable")
+    bulk.add_argument("--type", action="append", metavar="TYPE", dest="company_type", help="ltd, plc, llp ... repeatable")
+    bulk.add_argument("--location", metavar="PLACE", help="Registered office town/area, e.g. london")
+    bulk.add_argument("--name-includes", metavar="TEXT", help="Company name contains this text")
+    bulk.add_argument("--name-excludes", metavar="TEXT", help="Company name does not contain this text")
+    bulk.add_argument("--incorporated-from", metavar="YYYY-MM-DD", help="Incorporated on or after this date")
+    bulk.add_argument("--incorporated-to", metavar="YYYY-MM-DD", help="Incorporated on or before this date")
+    bulk.add_argument("--dissolved-from", metavar="YYYY-MM-DD", help="Dissolved on or after this date")
+    bulk.add_argument("--dissolved-to", metavar="YYYY-MM-DD", help="Dissolved on or before this date")
+    bulk.add_argument("--limit", type=int, default=1000, help="Maximum companies to return (default: 1000)")
+    bulk.add_argument("--full", action="store_true", help="Run the full KYB check on every company found (slow: ~4 requests each)")
     parser.add_argument("--api-key", help="API key (prefer COMPANIES_HOUSE_API_KEY or a .env file)")
     parser.add_argument("--format", default="json", help=f"Comma-separated: {', '.join(SUPPORTED_FORMATS)}, or 'all' (default: json)")
     parser.add_argument("--outdir", default="kyb_output", help="Output directory (default: kyb_output)")
@@ -863,12 +1132,53 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list] = None) -> int:
     args = build_parser().parse_args(argv)
 
-    if not args.company_numbers and not args.search:
+    if args.bulk_info:
+        print(bulk_snapshot_info())
+        return 0
+
+    if not (args.company_numbers or args.search or args.advanced_search or args.numbers_file):
         build_parser().print_help()
         return 2
 
     try:
         session = make_session(load_api_key(args.api_key))
+        formats = parse_formats(args.format)
+        company_numbers = list(args.company_numbers)
+
+        if args.numbers_file:
+            company_numbers.extend(read_numbers_file(args.numbers_file))
+
+        if args.advanced_search:
+            print("Searching the register ...", file=sys.stderr)
+            hits = advanced_search(
+                session,
+                name_includes=args.name_includes,
+                name_excludes=args.name_excludes,
+                sic_codes=args.sic,
+                company_status=args.status,
+                company_type=args.company_type,
+                location=args.location,
+                incorporated_from=args.incorporated_from,
+                incorporated_to=args.incorporated_to,
+                dissolved_from=args.dissolved_from,
+                dissolved_to=args.dissolved_to,
+                limit=args.limit,
+            )
+            if not hits:
+                print("No companies matched those filters.")
+                return 1
+            print(f"  {len(hits)} companies retrieved.", file=sys.stderr)
+
+            if not args.full:
+                # Directory only -- one row per company, no per-company lookups.
+                paths = export_search(hits, formats, args.outdir, args.stem)
+                print("\nWritten:")
+                for path in paths:
+                    print(f"  {path}")
+                print("\nAdd --full to also pull officers, PSC and sanctions screening for each.")
+                return 0
+
+            company_numbers.extend(h.get("company_number") for h in hits if h.get("company_number"))
 
         if args.search:
             found = search_company(session, args.search, items=10)
@@ -880,7 +1190,7 @@ def main(argv: Optional[list] = None) -> int:
             for item in items:
                 print(f"  {item.get('company_number'):<10} {item.get('title')}")
                 print(f"  {'':<10} {item.get('company_status', '?')} | {item.get('address_snippet', '')}\n")
-            if not args.company_numbers:
+            if not company_numbers:
                 print("Re-run with one of these company numbers to pull the full KYB record.")
                 return 0
 
@@ -894,15 +1204,30 @@ def main(argv: Optional[list] = None) -> int:
                 # Screening failing must not throw away the Companies House data.
                 print(f"  ! Sanctions screening skipped: {exc}", file=sys.stderr)
 
+        if len(company_numbers) > 10:
+            # Stay inside 600 requests / 5 minutes without relying on 429 retries.
+            globals()["MIN_REQUEST_INTERVAL"] = 0.55
+            minutes = len(company_numbers) * 4 * 0.55 / 60
+            print(f"  Pacing for the rate limit: roughly {minutes:.0f} minute(s) for {len(company_numbers)} companies.", file=sys.stderr)
+
         results = []
-        for number in args.company_numbers:
-            print(f"Fetching {normalise_company_number(number)} ...", file=sys.stderr)
-            result = run_kyb_check(session, number, include_filings=not args.no_filings)
+        for index, number in enumerate(company_numbers, start=1):
+            print(f"[{index}/{len(company_numbers)}] Fetching {normalise_company_number(number)} ...", file=sys.stderr)
+            try:
+                result = run_kyb_check(session, number, include_filings=not args.no_filings)
+            except KYBError as exc:
+                # One bad number must not lose the whole batch.
+                print(f"  ! Skipped {number}: {exc}".splitlines()[0], file=sys.stderr)
+                continue
             if sanctions_list:
                 screen_kyb_result(result, sanctions_list, args.threshold)
             results.append(result)
 
-        paths = export(results, parse_formats(args.format), args.outdir, args.stem)
+        if not results:
+            print("\nNo companies could be retrieved.", file=sys.stderr)
+            return 1
+
+        paths = export(results, formats, args.outdir, args.stem)
 
         print("\nWritten:")
         for path in paths:
