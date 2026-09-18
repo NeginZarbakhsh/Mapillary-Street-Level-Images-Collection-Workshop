@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import os
 import re
@@ -1065,6 +1066,210 @@ def _write_search_xlsx(path: Path, rows: list) -> None:
     wb.save(path)
 
 
+# ---------------------------------------------------------------------------
+# Step 1: bulk register snapshot ingestion (no API key, no rate limit)
+# ---------------------------------------------------------------------------
+# Companies House publishes the whole register as a free CSV -- the "Free
+# Company Data Product" -- refreshed monthly, no key needed:
+#   https://download.companieshouse.gov.uk/en_output.html
+# This reads that file (or the .zip it ships as) locally and produces a
+# filtered company list, entirely offline. It is Step 1 of the two-step
+# workflow: get every company matching your criteria from the snapshot,
+# THEN enrich only that shortlist with officers/PSC/sanctions via the live
+# API using --numbers-file (Step 2) -- rather than looping the rate-limited
+# API over the whole register.
+#
+# The file's own column names are used case/whitespace-insensitively (the
+# real file is known to ship at least one header with a stray leading
+# space, e.g. " CompanyNumber") since this sandbox cannot reach gov.uk to
+# confirm today's exact schema -- if Companies House has renamed a column
+# since this was written, _resolve_snapshot_columns() raises a clear error
+# naming what it could and could not find, rather than silently miscounting.
+_SNAPSHOT_COLUMN_ALIASES = {
+    "company_number": ["companynumber", "company_number"],
+    "company_name": ["companyname", "company_name"],
+    "company_status": ["companystatus", "company_status"],
+    "company_category": ["companycategory", "company_category", "companytype"],
+    "incorporation_date": ["incorporationdate", "incorporation_date"],
+    "dissolution_date": ["dissolutiondate", "dissolution_date"],
+    "country_of_origin": ["countryoforigin"],
+    "address_line_1": ["regaddress.addressline1"],
+    "address_line_2": ["regaddress.addressline2"],
+    "post_town": ["regaddress.posttown"],
+    "county": ["regaddress.county"],
+    "country": ["regaddress.country"],
+    "post_code": ["regaddress.postcode"],
+}
+_SNAPSHOT_SIC_PREFIX = "siccode.sictext_"
+_SNAPSHOT_REQUIRED = ("company_number", "company_name")
+
+
+def _resolve_snapshot_columns(fieldnames: list) -> dict:
+    """Map our logical field names onto whatever headers the file actually has.
+
+    Matches case- and whitespace-insensitively so the known stray-space quirk
+    in the official file, or a `CompanyName ` vs `CompanyName` difference,
+    doesn't break parsing.
+    """
+    normalised = {(f or "").strip().lower(): f for f in fieldnames}
+    colmap: dict = {}
+    for logical, aliases in _SNAPSHOT_COLUMN_ALIASES.items():
+        for alias in aliases:
+            if alias in normalised:
+                colmap[logical] = normalised[alias]
+                break
+
+    sic_columns = [normalised[k] for k in normalised if k.startswith(_SNAPSHOT_SIC_PREFIX)]
+    colmap["_sic_columns"] = sorted(sic_columns)
+
+    missing = [f for f in _SNAPSHOT_REQUIRED if f not in colmap]
+    if missing:
+        raise KYBError(
+            f"Could not find column(s) {missing} in the snapshot file.\n"
+            f"  Columns found: {', '.join(fieldnames[:15])}{' ...' if len(fieldnames) > 15 else ''}\n"
+            "  Companies House may have renamed a column since this tool was written --\n"
+            "  open the CSV's header row and check, or share it so this can be updated."
+        )
+    return colmap
+
+
+def _open_snapshot_reader(path: str):
+    """Yield (csv.DictReader, file_handles_to_close) for a .csv or .zip snapshot file.
+
+    Streams rather than loading the file into memory -- these run several
+    million rows and several GB uncompressed.
+    """
+    file = Path(path)
+    if not file.is_file():
+        raise KYBError(f"Snapshot file not found: {path}")
+
+    if file.suffix.lower() == ".zip":
+        import zipfile
+
+        zf = zipfile.ZipFile(file)
+        csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+        if not csv_names:
+            raise KYBError(f"No .csv file found inside {path}")
+        raw = zf.open(csv_names[0])
+        text = io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")
+        return csv.DictReader(text), [text, raw, zf]
+
+    if file.suffix.lower() == ".csv":
+        fh = file.open(encoding="utf-8-sig", newline="")
+        return csv.DictReader(fh), [fh]
+
+    raise KYBError(f"Snapshot file must be .csv or .zip, got: {file.suffix}")
+
+
+def _snapshot_row_to_dict(row: dict, colmap: dict) -> dict:
+    def get(logical: str) -> str:
+        col = colmap.get(logical)
+        return (row.get(col) or "").strip() if col else ""
+
+    sic_codes = []
+    for col in colmap.get("_sic_columns", []):
+        value = (row.get(col) or "").strip()
+        if value:
+            sic_codes.append(value.split(" - ")[0].strip())  # "62012 - Business ..." -> "62012"
+
+    address = _format_address(
+        {
+            "address_line_1": get("address_line_1"),
+            "address_line_2": get("address_line_2"),
+            "locality": get("post_town"),
+            "region": get("county"),
+            "postal_code": get("post_code"),
+            "country": get("country") or get("country_of_origin"),
+        }
+    )
+
+    return {
+        "company_number": get("company_number"),
+        "company_name": get("company_name"),
+        "company_status": get("company_status"),
+        "company_type": get("company_category"),
+        "date_of_creation": get("incorporation_date"),
+        "date_of_cessation": get("dissolution_date"),
+        "sic_codes": sic_codes,
+        "registered_address": address,
+    }
+
+
+def _snapshot_matches(row: dict, *, sic_codes, statuses, name_includes, name_excludes, location) -> bool:
+    if sic_codes and not any(code in row["sic_codes"] for code in sic_codes):
+        return False
+    if statuses and row["company_status"].strip().lower() not in {s.lower() for s in statuses}:
+        return False
+    if name_includes and name_includes.lower() not in row["company_name"].lower():
+        return False
+    if name_excludes and name_excludes.lower() in row["company_name"].lower():
+        return False
+    if location and location.lower() not in row["registered_address"].lower():
+        return False
+    return True
+
+
+def extract_from_snapshot(
+    path: str,
+    *,
+    sic_codes: Optional[list] = None,
+    statuses: Optional[list] = None,
+    name_includes: Optional[str] = None,
+    name_excludes: Optional[str] = None,
+    location: Optional[str] = None,
+    limit: Optional[int] = None,
+    progress_every: int = 250_000,
+) -> list:
+    """Step 1: read the bulk snapshot and return every matching company, offline.
+
+    No API key, no rate limit, no pagination cap -- bounded only by what is
+    actually in the file and what your filters match (or `limit`, if given).
+    Pass no filters at all to get literally every company in the file.
+    """
+    reader, handles = _open_snapshot_reader(path)
+    try:
+        colmap = _resolve_snapshot_columns(reader.fieldnames or [])
+        matched: list = []
+        scanned = 0
+
+        for raw_row in reader:
+            scanned += 1
+            row = _snapshot_row_to_dict(raw_row, colmap)
+            if not row["company_number"]:
+                continue
+            if _snapshot_matches(
+                row,
+                sic_codes=sic_codes,
+                statuses=statuses,
+                name_includes=name_includes,
+                name_excludes=name_excludes,
+                location=location,
+            ):
+                matched.append(row)
+                if limit and len(matched) >= limit:
+                    break
+            if scanned % progress_every == 0:
+                print(f"  ... scanned {scanned:,} rows, {len(matched):,} matched so far", file=sys.stderr)
+
+        print(f"  Scanned {scanned:,} rows, {len(matched):,} matched.", file=sys.stderr)
+        return matched
+    finally:
+        for h in handles:
+            try:
+                h.close()
+            except Exception:
+                pass
+
+
+def write_numbers_file(rows: list, outdir: Path, stem: str) -> Path:
+    """Write just the company numbers, one per line -- the direct input to
+    --numbers-file for Step 2 (enriching this shortlist with officers/PSC/
+    sanctions via the live API)."""
+    path = outdir / f"{stem}_numbers.txt"
+    path.write_text("\n".join(r["company_number"] for r in rows) + "\n", encoding="utf-8")
+    return path
+
+
 def parse_formats(value: str) -> list:
     if value.strip().lower() == "all":
         return list(SUPPORTED_FORMATS)
@@ -1092,12 +1297,32 @@ def build_parser() -> argparse.ArgumentParser:
             "  python companies_house_kyc.py --advanced-search --location london --limit 500 --full\n"
             "  python companies_house_kyc.py --numbers-file clients.csv --format xlsx\n"
             "  python companies_house_kyc.py --bulk-info\n"
+            "\n"
+            "  # Step 1: every match from the free monthly register snapshot, no API key\n"
+            "  python companies_house_kyc.py --from-snapshot BasicCompanyData.zip \\\n"
+            "      --snapshot-status active --snapshot-sic 62012 --format csv\n"
+            "  # Step 2: enrich just that shortlist with officers/PSC/sanctions\n"
+            "  python companies_house_kyc.py --numbers-file kyb_output/companies_numbers.txt --format xlsx\n"
         ),
     )
     parser.add_argument("company_numbers", nargs="*", help="One or more company numbers, e.g. 00102498")
     parser.add_argument("--search", metavar="NAME", help="Search by company name instead of number")
     parser.add_argument("--numbers-file", metavar="PATH", help="Read company numbers from a text/CSV file (one per line)")
     parser.add_argument("--bulk-info", action="store_true", help="Explain how to get every UK company, and exit")
+
+    snap = parser.add_argument_group(
+        "Step 1: bulk register snapshot (offline, no API key, no rate limit)",
+        "Filter the free monthly Company Data Product CSV/ZIP locally. Download it yourself "
+        "from download.companieshouse.gov.uk/en_output.html first. With no filters at all, "
+        "returns every company in the file.",
+    )
+    snap.add_argument("--from-snapshot", metavar="PATH", help="Path to the downloaded snapshot .csv or .zip")
+    snap.add_argument("--snapshot-sic", action="append", metavar="CODE", help="SIC code, repeatable")
+    snap.add_argument("--snapshot-status", action="append", metavar="STATUS", help="e.g. active, dissolved. Repeatable")
+    snap.add_argument("--snapshot-name-includes", metavar="TEXT", help="Company name contains this text")
+    snap.add_argument("--snapshot-name-excludes", metavar="TEXT", help="Company name does not contain this text")
+    snap.add_argument("--snapshot-location", metavar="TEXT", help="Registered address contains this text")
+    snap.add_argument("--snapshot-limit", type=int, help="Stop after this many matches (default: unlimited)")
 
     bulk = parser.add_argument_group(
         "bulk listing (advanced search)",
@@ -1135,6 +1360,49 @@ def main(argv: Optional[list] = None) -> int:
     if args.bulk_info:
         print(bulk_snapshot_info())
         return 0
+
+    if args.from_snapshot:
+        # Step 1: entirely offline, no API key, no rate limit.
+        try:
+            formats = parse_formats(args.format)
+            if any(f in ("json", "xlsx", "md") for f in formats) and not args.snapshot_limit:
+                raise KYBError(
+                    "--format json/xlsx/md with no --snapshot-limit could try to hold millions\n"
+                    "  of rows in memory at once. Either add --snapshot-limit, or use --format csv\n"
+                    "  (or txt), which write incrementally and have no such limit."
+                )
+            print("Reading snapshot ...", file=sys.stderr)
+            rows = extract_from_snapshot(
+                args.from_snapshot,
+                sic_codes=args.snapshot_sic,
+                statuses=args.snapshot_status,
+                name_includes=args.snapshot_name_includes,
+                name_excludes=args.snapshot_name_excludes,
+                location=args.snapshot_location,
+                limit=args.snapshot_limit,
+            )
+            if not rows:
+                print("No companies matched those filters.")
+                return 1
+
+            outdir = Path(args.outdir)
+            outdir.mkdir(parents=True, exist_ok=True)
+            stem = args.stem or f"companies_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            paths = export_search(rows, formats, args.outdir, stem)
+            numbers_path = write_numbers_file(rows, outdir, stem)
+
+            print("\nWritten:")
+            for path in paths:
+                print(f"  {path}")
+            print(f"  {numbers_path}")
+            print(
+                f"\nStep 2 -- enrich these {len(rows)} companies with officers/PSC/sanctions:\n"
+                f"  python companies_house_kyc.py --numbers-file {numbers_path} --format xlsx"
+            )
+            return 0
+        except KYBError as exc:
+            print(f"\nError: {exc}", file=sys.stderr)
+            return 1
 
     if not (args.company_numbers or args.search or args.advanced_search or args.numbers_file):
         build_parser().print_help()

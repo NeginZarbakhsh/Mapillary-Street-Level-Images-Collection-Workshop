@@ -161,23 +161,49 @@ Companies House caps how deep pagination can go, so a very broad filter returns 
 few thousand rather than the true total — the run prints the real `hits` count. Split large
 sets by SIC code or by year to work through them.
 
-### 2. The complete register — bulk snapshot
+### 2. The complete register — bulk snapshot (`--from-snapshot`), in two steps
 
 For genuinely *all* companies, download the free **Company Data Product**: a monthly CSV
 snapshot of every live company (several million rows, ~400 MB zipped, no key needed) from
 <http://download.companieshouse.gov.uk/en_output.html>. It carries number, name, address,
-status, SIC codes and accounts dates, but **not** officers or PSC detail — those are separate
-data products on the same site.
+status, SIC codes and incorporation date, but **not** officers or PSC detail — those are
+separate data products on the same site. This sandbox cannot reach that page, so the exact
+current filename couldn't be confirmed here — download it yourself and point `--from-snapshot`
+at whatever you got (`.zip` as downloaded, or the `.csv` extracted from it, both work).
 
-Then enrich the ones you care about:
+**Step 1 — filter the snapshot locally.** No API key, no rate limit, no `--limit` cap (unlike
+`--advanced-search`, which Companies House itself caps): bounded only by what's actually in
+the file and what your filters match.
 
 ```bash
-# clients.csv just needs company numbers in the first column
-python companies_house_kyc.py --numbers-file clients.csv --format xlsx
+# Every active software company (SIC 62012) in the whole register
+python companies_house_kyc.py --from-snapshot BasicCompanyData.zip \
+    --snapshot-status active --snapshot-sic 62012 --format csv
+
+# No filters at all -> every company in the file
+python companies_house_kyc.py --from-snapshot BasicCompanyData.zip --format csv
 ```
 
-`--numbers-file` skips a header row, comments (`#`) and blank lines, and a company number that
-fails is logged and skipped rather than losing the whole batch.
+Filters: `--snapshot-sic`, `--snapshot-status`, `--snapshot-name-includes/-excludes`,
+`--snapshot-location`, `--snapshot-limit` (an actual cap, unlike `--advanced-search --limit`
+which just requests a cap the API may not honour for very broad filters).
+
+This writes your chosen format **and** a `<stem>_numbers.txt` — one company number per line —
+ready for Step 2. `--format json/xlsx/md` is refused unless you also set `--snapshot-limit`,
+since an unfiltered run against the full register could otherwise try to hold millions of rows
+in memory at once; `--format csv` (or `txt`) has no such limit — use that for very large runs.
+
+**Step 2 — enrich only that shortlist** with officers, PSC and sanctions screening via the live
+API (this is where the API's rate limit actually applies, so keep this list to companies you
+actually need):
+
+```bash
+python companies_house_kyc.py --numbers-file kyb_output/companies_numbers.txt --format xlsx
+```
+
+`--numbers-file` also accepts a list you already have from elsewhere — it skips a header row,
+comments (`#`) and blank lines, and a company number that fails is logged and skipped rather
+than losing the whole batch.
 
 ### 3. Streaming API
 
