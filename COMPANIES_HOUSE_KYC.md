@@ -209,3 +209,40 @@ than losing the whole batch.
 
 For keeping a loaded snapshot in sync in real time. Needs a separate streaming key — not
 covered by this tool.
+
+## Other countries: France and Norway (`eu_company_registries.py`)
+
+Two more official government registers with free, open REST APIs that include
+directors — **no API key, no registration**:
+
+| Country | Register | Company ID | Directors | Extras |
+| --- | --- | --- | --- | --- |
+| France (EU) | [Recherche d'entreprises](https://recherche-entreprises.api.gouv.fr) (SIRENE + national company register) | SIREN, 9 digits (a 14-digit SIRET also works) | Name, role, birth year, nationality; corporate directors/auditors with their SIREN | Share capital, turnover/net result where filed, insolvency notices |
+| Norway (EEA) | [Enhetsregisteret](https://data.brreg.no/enhetsregisteret/api/dokumentasjon/en/index.html), Brønnøysund Register Centre | organisasjonsnummer, 9 digits | Name, role, full birth date; auditors/corporate roles with their org number | Bankruptcy/liquidation flags, employees, VAT registration |
+
+```bash
+python eu_company_registries.py --country fr 552032534
+python eu_company_registries.py --country no 923609016 --format xlsx
+python eu_company_registries.py --country fr --search "danone"
+python eu_company_registries.py --country fr --industry 62.01Z --region 75 --status active --limit 200
+python eu_company_registries.py --country no --industry 62.010 --region 0301 --limit 200 --full
+python eu_company_registries.py --country no --ids-file norway_ids.txt --format csv
+python eu_company_registries.py --country fr 552032534 --sanctions   # needs companies_house_kyc.py alongside
+```
+
+Output goes to `registry_output/` in the same shape for both countries (Companies + People),
+as JSON, CSV or Excel.
+
+Notes:
+- Both APIs return **at most 10,000 results per search** — split large sets by region or
+  industry code. France returns directors inside each search result; Norway needs `--full`
+  (one extra request per company).
+- Neither gives a full shareholder register or exact ownership percentages.
+- Norway is in the EEA, not the EU.
+- Birth dates are personal data: Norway publishes the full date, France mostly the year.
+- Both countries also publish full bulk files (France: SIRENE stock files on data.gouv.fr;
+  Norway: `data.brreg.no/enhetsregisteret/api/enheter/lastned`) for whole-register work —
+  same two-step idea as the UK snapshot.
+- Field names and limits were taken from the French API's own source code and the
+  maintained `python-brreg` client, and tested against mocked responses; this environment
+  cannot reach either live API.

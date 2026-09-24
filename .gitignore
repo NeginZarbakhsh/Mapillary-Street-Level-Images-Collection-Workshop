@@ -6,3 +6,6 @@ kyb_output/
 uk_sanctions_list.xml
 __pycache__/
 *.pyc
+
+# EU registry tool output
+registry_output/
