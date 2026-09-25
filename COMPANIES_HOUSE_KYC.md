@@ -246,3 +246,25 @@ Notes:
 - Field names and limits were taken from the French API's own source code and the
   maintained `python-brreg` client, and tested against mocked responses; this environment
   cannot reach either live API.
+
+## Switzerland: Zefix (`zefix_switzerland.py`)
+
+Zefix is the central index of the Swiss commercial registers (Federal Office of Justice).
+The API is free but **needs a username and password**, requested by email to
+`zefix@bj.admin.ch`. Full step-by-step setup, including an email template:
+[`ZEFIX_SETUP_GUIDE.txt`](ZEFIX_SETUP_GUIDE.txt).
+
+```bash
+python zefix_switzerland.py CHE-110.088.994 --format xlsx
+python zefix_switzerland.py --search "bank" --canton ZH --limit 50 --full --format xlsx
+python zefix_switzerland.py --uids-file swiss_uids.txt --format csv
+```
+
+Per company: UID, CH-ID, status, legal form, seat, canton, address, purpose, share capital,
+audit firms, offices, takeovers, former names, and every SOGC (gazette) notice in full.
+**No structured directors or shareholders** — Zefix has no people fields; people appear only
+in the gazette notice text and the cantonal register extract (linked per company).
+
+Endpoints and field names come from two open-source Zefix wrappers, one of which tests
+against the live API; tested here against mocked responses, since this environment cannot
+reach Zefix.

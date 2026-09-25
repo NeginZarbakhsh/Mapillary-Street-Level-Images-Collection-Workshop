@@ -9,3 +9,4 @@ __pycache__/
 
 # EU registry tool output
 registry_output/
+zefix_output/

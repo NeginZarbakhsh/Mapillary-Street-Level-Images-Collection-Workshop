@@ -1,0 +1,133 @@
+ZEFIX (SWITZERLAND) COMPANY LOOKUP - SETUP GUIDE
+================================================
+
+Zefix is the central index of the Swiss commercial registers, run by the
+Federal Office of Justice. The API is free, but unlike France and Norway it
+needs a username and password, which you request by email.
+
+Files:
+  zefix_switzerland.py     the script (if you received it as .txt, rename it to .py)
+  ZEFIX_SETUP_GUIDE.txt    this guide
+
+
+WHAT YOU GET / WHAT YOU DON'T
+-----------------------------
+You get, per company:
+  - name, UID (CHE-xxx.xxx.xxx), CH-ID, status (active / being cancelled / cancelled)
+  - legal form, legal seat, canton, address, purpose, share capital
+  - audit firms, head and branch offices, takeovers, former names
+  - every Swiss Official Gazette of Commerce (SOGC / SHAB) notice about the company
+  - a link to the official cantonal register extract
+
+You do NOT get directors, board members, signatories or shareholders as
+separate fields. Zefix has no fields for people. People are named inside the
+gazette notice text (the Publications sheet has the full text) and in the
+cantonal register extract (link in the cantonal_excerpt_url column).
+
+
+STEP 1 - Request credentials (one time, can take a few days)
+-------------------------------------------------------------
+Send an email to:  zefix@bj.admin.ch
+
+  Subject: Request for Zefix Public REST API access
+
+  Hello,
+
+  I would like to request credentials for the Zefix Public REST API.
+
+  Organisation: [your organisation]
+  Name / contact: [your name, email]
+  Intended use: looking up Swiss company register data (company details,
+  status and SOGC publications) for know-your-customer checks on business
+  counterparties. Expected volume: [e.g. a few hundred lookups per month].
+
+  Could you please confirm whether the credentials work for production
+  (www.zefix.admin.ch) as well as the test environment?
+
+  Kind regards,
+  [name]
+
+Check with your manager before sending it on behalf of the firm, since it
+names the organisation.
+
+
+STEP 2 - Put the script in place
+---------------------------------
+1. Save zefix_switzerland.py into your UK_Data folder, next to
+   companies_house_kyc.py.
+2. If you received it as .txt, rename it to zefix_switzerland.py.
+   In File Explorer, turn on View > Show > File name extensions so you can
+   see you don't end up with zefix_switzerland.py.txt.
+3. Open the VS Code terminal and go to that folder:
+
+   cd "C:\Users\nzarbakhsh\OneDrive - KPMG\Desktop\Germany Project\KYC AI Assistant 04august\src\kyc_assistant\services\UK_Data"
+
+4. Install the libraries (skip if you already did this for the UK tool):
+
+   pip install requests openpyxl
+
+5. Check the script runs (this needs no credentials):
+
+   python .\zefix_switzerland.py --help
+
+
+STEP 3 - Add your credentials (once you have them)
+---------------------------------------------------
+Option A - just for the current terminal (PowerShell):
+
+   $env:ZEFIX_USERNAME = "your-username"
+   $env:ZEFIX_PASSWORD = "your-password"
+
+   Set these again whenever you open a new terminal.
+
+Option B - permanent, in the .env file next to the script. The UK tool's
+.env file can be reused; add two lines:
+
+   ZEFIX_USERNAME=your-username
+   ZEFIX_PASSWORD=your-password
+
+Never email the password, paste it into chat, or commit the .env file.
+
+
+STEP 4 - Test with one company
+------------------------------
+   python .\zefix_switzerland.py CHE-110.088.994 --format xlsx
+
+(CHE-110.088.994 is Microsoft Schweiz GmbH.)
+This writes zefix_output\ch_<date>.xlsx with two sheets:
+  Companies     one row per company
+  Publications  one row per gazette notice, newest first, full text
+
+If you get "401 Unauthorized":
+  - check the username and password were copied exactly
+  - your credentials may only be enabled for the test system. Try:
+      python .\zefix_switzerland.py CHE-110.088.994 --env test
+  - on the KPMG network a proxy can strip the login header; try once on a
+    phone hotspot to rule that out
+
+
+STEP 5 - Real use
+-----------------
+Search by name (quick short list: name, UID, status, legal form, seat):
+   python .\zefix_switzerland.py --search "bank" --canton ZH --limit 50
+
+Same, with full details and gazette notices for every hit:
+   python .\zefix_switzerland.py --search "bank" --canton ZH --limit 50 --full --format xlsx
+
+Your own list of companies (one UID per line; a header row is skipped):
+   python .\zefix_switzerland.py --uids-file swiss_uids.txt --format xlsx
+
+Other options:
+   --include-inactive   search also returns cancelled companies
+   --lang de            legal form labels in German (also fr, it; default en)
+   --format json,csv,xlsx
+   --outdir <folder>    default zefix_output
+
+
+GOOD TO KNOW
+------------
+- UIDs work in any common form: CHE-110.088.994, CHE110088994 or 110088994.
+- Search needs a company name. There is no "list every Swiss company" call.
+- Zefix publishes no rate limit; the script waits 0.3 s between calls to stay polite.
+- A UID that doesn't exist is reported as "Not found" and the batch carries on.
+- Gazette notice text is in the language of the canton (German, French or Italian).
