@@ -39,6 +39,9 @@ USAGE
     python zefix_switzerland.py --search "microsoft"
     python zefix_switzerland.py --search "bank" --canton ZH --limit 50 --full --format xlsx
     python zefix_switzerland.py --uids-file swiss_uids.txt --format csv
+
+    # You have company NAMES but no UIDs (e.g. banks copied from FINMA's list):
+    python zefix_switzerland.py --names-file zurich_banks.xlsx --canton ZH --format xlsx
 """
 
 from __future__ import annotations
@@ -50,7 +53,9 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -78,6 +83,8 @@ COMPANY_FIELDS = [
     "was_taken_over_by", "former_names", "publication_count", "cantonal_excerpt_url",
     "zefix_url", "retrieved_at",
 ]
+
+MATCH_FIELDS = ["name_given", "result", "matched_name", "uid", "legal_seat", "status", "candidates"]
 
 PUBLICATION_FIELDS = [
     "uid", "company_name", "sogc_date", "sogc_id", "canton", "journal_date",
@@ -293,7 +300,8 @@ def _cell(v) -> str:
     return "" if v is None else str(v)
 
 
-def export(companies: list, publications: list, formats: Iterable[str], outdir: str, stem: str) -> list:
+def export(companies: list, publications: list, formats: Iterable[str], outdir: str, stem: str,
+           matches: Optional[list] = None) -> list:
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
     written = []
@@ -301,11 +309,14 @@ def export(companies: list, publications: list, formats: Iterable[str], outdir: 
         if fmt == "json":
             path = out / f"{stem}.json"
             data = [dict(c, publications=[p for p in publications if p["uid"] == c["uid"]]) for c in companies]
+            if matches:
+                data = {"companies": data, "matching": matches}
             path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
             written.append(path)
         elif fmt == "csv":
             for label, fields, rows in (("companies", COMPANY_FIELDS, companies),
-                                        ("publications", PUBLICATION_FIELDS, publications)):
+                                        ("publications", PUBLICATION_FIELDS, publications),
+                                        ("matching", MATCH_FIELDS, matches or [])):
                 if not rows:
                     continue
                 path = out / f"{stem}_{label}.csv"
@@ -324,8 +335,10 @@ def export(companies: list, publications: list, formats: Iterable[str], outdir: 
             path = out / f"{stem}.xlsx"
             wb = Workbook()
             wb.remove(wb.active)
-            for title, fields, rows in (("Companies", COMPANY_FIELDS, companies),
-                                        ("Publications", PUBLICATION_FIELDS, publications)):
+            sheets = [("Companies", COMPANY_FIELDS, companies), ("Publications", PUBLICATION_FIELDS, publications)]
+            if matches:
+                sheets.append(("Matching", MATCH_FIELDS, matches))
+            for title, fields, rows in sheets:
                 ws = wb.create_sheet(title)
                 ws.append(fields)
                 for cell in ws[1]:
@@ -360,6 +373,105 @@ def read_uids_file(path: str) -> list:
     return uids
 
 
+def read_names_file(path: str) -> list:
+    """Company names from the first column of a .txt, .csv or .xlsx file.
+
+    Made for lists copied out of FINMA's register of authorised banks, or any
+    list of names: blank lines, '#' comments and a header row are skipped.
+    """
+    p = Path(path)
+    if not p.is_file():
+        raise ZefixError(f"Names file not found: {path}")
+    if p.suffix.lower() in (".xlsx", ".xlsm"):
+        try:
+            from openpyxl import load_workbook
+        except ImportError as exc:
+            raise ZefixError("Reading .xlsx needs openpyxl:  pip install openpyxl") from exc
+        ws = load_workbook(p, read_only=True, data_only=True).worksheets[0]
+        raw = [str(row[0]).strip() for row in ws.iter_rows(values_only=True) if row and row[0] is not None]
+    else:
+        with p.open(encoding="utf-8-sig", newline="") as fh:
+            raw = [row[0].strip() for row in csv.reader(fh) if row]
+    names = [n for n in raw if n and not n.startswith("#")]
+    if names and names[0].strip().lower() in {"name", "names", "company", "company name", "firma", "bank"}:
+        names = names[1:]
+    seen, unique = set(), []
+    for n in names:
+        if n.lower() not in seen:
+            seen.add(n.lower())
+            unique.append(n)
+    if not unique:
+        raise ZefixError(f"No company names found in {path}")
+    return unique
+
+
+def _norm(name: str) -> str:
+    """Lower-case, strip accents and punctuation: 'Zürcher Kantonalbank' -> 'zurcher kantonalbank'."""
+    name = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode()
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", name.lower()).split())
+
+
+def match_name(name: str, hits: list, threshold: float = 0.85) -> tuple:
+    """Pick the Zefix record a given name refers to.
+
+    Returns (hit or None, result label). Only confident matches are taken:
+    an exact name match (ignoring case, accents and punctuation), the only
+    hit, or one clearly-best hit above the similarity threshold. Anything
+    else is reported as ambiguous for a person to resolve, rather than
+    guessed.
+    """
+    if not hits:
+        return None, "no match"
+    target = _norm(name)
+    exact = [h for h in hits if _norm(h.get("name")) == target]
+    active_exact = [h for h in exact if h.get("status") == "ACTIVE"] or exact
+    if len(active_exact) == 1:
+        return active_exact[0], "exact"
+    if len(hits) == 1:
+        return hits[0], "only hit"
+    scored = sorted(((SequenceMatcher(None, target, _norm(h.get("name"))).ratio(), h) for h in hits),
+                    key=lambda t: t[0], reverse=True)
+    best, runner_up = scored[0], scored[1]
+    if best[0] >= threshold and best[0] - runner_up[0] >= 0.05:
+        return best[1], f"close match ({best[0]:.2f})"
+    return None, f"ambiguous ({len(hits)} hits)"
+
+
+def resolve_names(client: "ZefixClient", names: list, *, canton: Optional[str],
+                  active_only: bool) -> tuple:
+    """Search Zefix for each name; return (matched UIDs, matching-report rows)."""
+    uids, report = [], []
+    for i, name in enumerate(names, start=1):
+        print(f"[{i}/{len(names)}] searching '{name}' ...", file=sys.stderr)
+        try:
+            hits = client.search(name, canton=canton, active_only=active_only)
+        except ZefixError as exc:
+            if "401" in str(exc):
+                raise
+            report.append({"name_given": name, "result": f"error: {str(exc).splitlines()[0]}"})
+            continue
+        hit, result = match_name(name, hits)
+        others = [h for h in hits if h is not hit][:5]
+        row = {
+            "name_given": name,
+            "result": result,
+            "candidates": "; ".join(f"{h.get('name')} ({h.get('legalSeat')})" for h in others),
+        }
+        if hit:
+            row.update({
+                "matched_name": hit.get("name"),
+                "uid": format_uid(hit["uid"]) if hit.get("uid") else "",
+                "legal_seat": hit.get("legalSeat"),
+                "status": STATUS_LABELS.get(hit.get("status"), hit.get("status") or ""),
+            })
+            if hit.get("uid"):
+                uids.append(hit["uid"])
+        else:
+            print(f"  ! {result} -- see the Matching sheet", file=sys.stderr)
+        report.append(row)
+    return uids, report
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -374,10 +486,14 @@ def build_parser() -> argparse.ArgumentParser:
             "  python zefix_switzerland.py --search microsoft\n"
             "  python zefix_switzerland.py --search bank --canton ZH --limit 50 --full --format xlsx\n"
             "  python zefix_switzerland.py --uids-file swiss_uids.txt --format csv\n"
+            "  python zefix_switzerland.py --names-file zurich_banks.xlsx --canton ZH --format xlsx\n"
         ),
     )
     p.add_argument("uids", nargs="*", help="Swiss UIDs, e.g. CHE-110.088.994 (CHE110088994 also works)")
     p.add_argument("--uids-file", metavar="PATH", help="Text/CSV file with one UID per line")
+    p.add_argument("--names-file", metavar="PATH",
+                   help="Company NAMES (first column of .txt/.csv/.xlsx), e.g. banks copied from FINMA's list. "
+                        "Each is searched in Zefix, matched, then looked up in full.")
     p.add_argument("--search", metavar="NAME", help="Search by company name")
     p.add_argument("--canton", metavar="XX", help="Limit the search to one canton, e.g. ZH, GE, VD")
     p.add_argument("--include-inactive", action="store_true", help="Search also returns cancelled companies")
@@ -407,12 +523,20 @@ def main(argv: Optional[list] = None) -> int:
         uids = list(args.uids)
         if args.uids_file:
             uids.extend(read_uids_file(args.uids_file))
-        if not uids and not args.search:
+        names = read_names_file(args.names_file) if args.names_file else []
+        if not uids and not args.search and not names:
             build_parser().print_help()
             return 2
 
         client = ZefixClient(*load_credentials(args.username, args.password), env=args.env)
-        companies, publications = [], []
+        companies, publications, matches = [], [], []
+
+        if names:
+            print(f"Matching {len(names)} names against Zefix ...", file=sys.stderr)
+            found, matches = resolve_names(client, names, canton=args.canton.upper() if args.canton else None,
+                                           active_only=not args.include_inactive)
+            print(f"  {len(found)} of {len(names)} names matched to a company.", file=sys.stderr)
+            uids.extend(u for u in found if u not in uids)
 
         if args.search:
             print(f"Searching Zefix for '{args.search}' ...", file=sys.stderr)
@@ -440,15 +564,19 @@ def main(argv: Optional[list] = None) -> int:
             companies.append(company_row(full, args.lang))
             publications.extend(publication_rows(full))
 
-        if not companies:
+        if not companies and not matches:
             print("No companies found.", file=sys.stderr)
             return 1
 
         stem = args.stem or f"ch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        paths = export(companies, publications, formats, args.outdir, stem)
+        paths = export(companies, publications, formats, args.outdir, stem, matches)
         print(f"\n{len(companies)} companies, {len(publications)} gazette notices. Written:")
         for path in paths:
             print(f"  {path}")
+        unresolved = [m for m in matches if not m.get("uid")]
+        if unresolved:
+            print(f"\n{len(unresolved)} name(s) not matched automatically -- check the Matching sheet, "
+                  "then add their UIDs to a --uids-file.")
         if args.search and not args.full:
             print("\nSearch results are short records. Add --full for address, purpose, auditors and gazette notices.")
         return 0

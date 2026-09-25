@@ -124,6 +124,42 @@ Other options:
    --outdir <folder>    default zefix_output
 
 
+STEP 6 - Finding companies when you don't know their names (e.g. banks in Zurich)
+--------------------------------------------------------------------------------
+Zefix can only search by name. It has no "industry" or "is a bank" filter,
+and searching "bank" misses UBS, Julius Baer, Vontobel and others while
+picking up non-banks like "Datenbank AG". So get the names from the source
+that decides who is a bank: FINMA, the Swiss financial regulator.
+
+1. Open FINMA's list of authorised banks and securities firms:
+     https://www.finma.ch/en/finma-public/authorised-institutions-individuals-and-products/
+   (the list is a PDF with columns Name, City, licensing, foreign control)
+
+2. Copy the rows whose City is Zurich (Zürich) into Excel, company NAME in
+   column A (a "Name" header row is fine). Save as zurich_banks.xlsx in the
+   UK_Data folder. A .csv or .txt with one name per line works too.
+
+3. Run:
+     python .\zefix_switzerland.py --names-file zurich_banks.xlsx --canton ZH --format xlsx
+
+   For each name the script searches Zefix, picks the matching company and
+   downloads its full details. The Excel file gets a third sheet, Matching,
+   showing for every name what it matched (or didn't):
+     exact              name matches exactly (ignoring case, accents, punctuation)
+     only hit           Zefix returned a single company
+     close match (0.9x) one clearly-best, very similar name
+     ambiguous (N hits) several possible companies -- NOT guessed; candidates listed
+     no match           nothing found (try without --canton: FINMA lists the
+                        city of the office, but the legal seat may be elsewhere)
+
+4. For ambiguous / no-match rows, pick the right company from the candidates
+   (or look it up on www.zefix.ch), put its UID in a text file, and run:
+     python .\zefix_switzerland.py --uids-file extra_uids.txt --format xlsx
+
+Quick-and-rough alternative (incomplete, see above):
+     python .\zefix_switzerland.py --search "bank" --canton ZH --limit 200 --format xlsx
+
+
 GOOD TO KNOW
 ------------
 - UIDs work in any common form: CHE-110.088.994, CHE110088994 or 110088994.

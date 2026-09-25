@@ -258,7 +258,14 @@ The API is free but **needs a username and password**, requested by email to
 python zefix_switzerland.py CHE-110.088.994 --format xlsx
 python zefix_switzerland.py --search "bank" --canton ZH --limit 50 --full --format xlsx
 python zefix_switzerland.py --uids-file swiss_uids.txt --format csv
+# Names but no UIDs (e.g. banks copied from FINMA's list of authorised banks):
+python zefix_switzerland.py --names-file zurich_banks.xlsx --canton ZH --format xlsx
 ```
+
+`--names-file` searches Zefix for each name and only takes confident matches (exact, only hit, or one
+clearly-best close match); ambiguous names are listed with their candidates on a Matching sheet
+instead of being guessed. Zefix cannot filter by industry, so for "all banks" start from FINMA's
+list of authorised banks and securities firms.
 
 Per company: UID, CH-ID, status, legal form, seat, canton, address, purpose, share capital,
 audit firms, offices, takeovers, former names, and every SOGC (gazette) notice in full.
