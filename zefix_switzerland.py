@@ -225,6 +225,21 @@ def format_uid(value: str) -> str:
     return f"CHE-{digits[0:3]}.{digits[3:6]}.{digits[6:9]}"
 
 
+def display_uid(value) -> str:
+    """Format a UID for output without ever raising.
+
+    Register data is not always clean -- related companies (auditors,
+    branches, head offices) sometimes carry a blank or space-padded UID.
+    Those become "" instead of stopping the run.
+    """
+    if not value or not str(value).strip():
+        return ""
+    try:
+        return format_uid(value)
+    except ZefixError:
+        return str(value).strip()
+
+
 def compact_uid(value: str) -> str:
     """Any UID form -> CHE105997170, the form Zefix accepts in lookup URLs."""
     return format_uid(value).replace("-", "").replace(".", "")
@@ -238,7 +253,7 @@ def _text(value, lang: str = "en") -> str:
 
 
 def _names(items) -> str:
-    return "; ".join(f"{c.get('name')} ({format_uid(c['uid']) if c.get('uid') else 'no UID'})"
+    return "; ".join(f"{c.get('name')} ({display_uid(c.get('uid')) or 'no UID'})"
                      for c in items or [] if c.get("name"))
 
 
@@ -255,7 +270,7 @@ def _address(a: Optional[dict]) -> str:
 def company_row(c: dict, lang: str = "en") -> dict:
     legal_form = c.get("legalForm") or {}
     capital = c.get("capitalNominal")
-    uid = format_uid(c["uid"]) if c.get("uid") else ""
+    uid = display_uid(c.get("uid"))
     return {
         "country": "CH",
         "uid": uid,
@@ -285,7 +300,7 @@ def company_row(c: dict, lang: str = "en") -> dict:
 
 
 def publication_rows(c: dict) -> list:
-    uid = format_uid(c["uid"]) if c.get("uid") else ""
+    uid = display_uid(c.get("uid"))
     rows = []
     for p in sorted(c.get("sogcPub") or [], key=lambda p: p.get("sogcDate") or "", reverse=True):
         rows.append({
@@ -469,12 +484,14 @@ def resolve_names(client: "ZefixClient", names: list, *, canton: Optional[str],
         if hit:
             row.update({
                 "matched_name": hit.get("name"),
-                "uid": format_uid(hit["uid"]) if hit.get("uid") else "",
+                "uid": display_uid(hit.get("uid")),
                 "legal_seat": hit.get("legalSeat"),
                 "status": STATUS_LABELS.get(hit.get("status"), hit.get("status") or ""),
             })
-            if hit.get("uid"):
+            if display_uid(hit.get("uid")).startswith("CHE-"):
                 uids.append(hit["uid"])
+            else:
+                row["result"] += " -- but Zefix has no valid UID for it"
         else:
             print(f"  ! {result} -- see the Matching sheet", file=sys.stderr)
         report.append(row)
@@ -570,8 +587,13 @@ def main(argv: Optional[list] = None) -> int:
             if full is None:
                 print(f"  ! Not found: {uid}", file=sys.stderr)
                 continue
-            companies.append(company_row(full, args.lang))
-            publications.extend(publication_rows(full))
+            try:
+                row, pubs = company_row(full, args.lang), publication_rows(full)
+            except Exception as exc:  # unexpected register data: report it, keep going
+                print(f"  ! Skipped {uid}: could not read its record ({exc})", file=sys.stderr)
+                continue
+            companies.append(row)
+            publications.extend(pubs)
 
         if not companies and not matches:
             print("No companies found.", file=sys.stderr)
