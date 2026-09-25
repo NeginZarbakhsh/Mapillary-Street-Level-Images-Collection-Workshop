@@ -192,8 +192,12 @@ class ZefixClient:
         raise ZefixError(f"Request to {path} failed.")
 
     def company_by_uid(self, uid: str) -> Optional[dict]:
-        """GET /company/uid/{uid}. Zefix answers with a list; empty or 404 = not found."""
-        data = self._request("GET", f"/company/uid/{format_uid(uid)}", not_found_ok=True)
+        """GET /company/uid/{uid}. Zefix answers with a list; empty or 404 = not found.
+
+        The path must use the compact form (CHE105997170): Zefix does not
+        recognise the dotted display form (CHE-105.997.170) there.
+        """
+        data = self._request("GET", f"/company/uid/{compact_uid(uid)}", not_found_ok=True)
         if isinstance(data, list):
             return data[0] if data else None
         return data or None
@@ -219,6 +223,11 @@ def format_uid(value: str) -> str:
     if len(digits) != 9:
         raise ZefixError(f"'{value}' is not a Swiss UID (CHE followed by 9 digits, e.g. CHE-110.088.994).")
     return f"CHE-{digits[0:3]}.{digits[3:6]}.{digits[6:9]}"
+
+
+def compact_uid(value: str) -> str:
+    """Any UID form -> CHE105997170, the form Zefix accepts in lookup URLs."""
+    return format_uid(value).replace("-", "").replace(".", "")
 
 
 def _text(value, lang: str = "en") -> str:
